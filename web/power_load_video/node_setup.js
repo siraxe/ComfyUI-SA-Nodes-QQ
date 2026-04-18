@@ -22,8 +22,8 @@ export function createOnNodeCreatedWrapper(originalOnNodeCreated, nodeData) {
         if (this.size[0] < 620) {
             this.size[0] = 620;
         }
-        if (this.size[1] > 550) {
-            this.size[1] = 550;
+        if (this.size[1] > 565) {
+            this.size[1] = 565;
         }
 
         // Enforce min width and max height on resize
@@ -31,8 +31,8 @@ export function createOnNodeCreatedWrapper(originalOnNodeCreated, nodeData) {
             if (size[0] < 620) {
                 size[0] = 620;
             }
-            if (size[1] > 550) {
-                size[1] = 550;
+            if (size[1] > 565) {
+                size[1] = 565;
             }
         };
 
@@ -450,6 +450,13 @@ export function createOnNodeCreatedWrapper(originalOnNodeCreated, nodeData) {
                 if (w) {
                     w.computeSize = () => [0, 0];
                     w.hidden = true;
+                    // Ensure float widgets always have a valid numeric value
+                    // (ComfyUI's prompt validator rejects {} or None for FLOAT inputs)
+                    if (name === 'force_fps' || name === 'max_fps') {
+                        if (typeof w.value !== 'number' || isNaN(w.value)) {
+                            w.value = 0;
+                        }
+                    }
                 }
             }
             // Sync initial crop values to hidden widgets

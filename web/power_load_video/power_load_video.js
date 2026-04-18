@@ -554,13 +554,25 @@ app.registerExtension({
                 }
                 // Restore force_fps from hidden widget to custom UI
                 const forceFpsWidget = this.widgets.find(w => w.name === 'force_fps');
-                if (forceFpsWidget && typeof forceFpsWidget.value === 'number' && this.topRowWidget) {
-                    this.topRowWidget.forceFpsValue = String(forceFpsWidget.value);
+                if (forceFpsWidget) {
+                    // Sanitize: ensure valid float value (ComfyUI validator rejects {} or None)
+                    if (typeof forceFpsWidget.value !== 'number' || isNaN(forceFpsWidget.value)) {
+                        forceFpsWidget.value = 0;
+                    }
+                    if (this.topRowWidget) {
+                        this.topRowWidget.forceFpsValue = String(forceFpsWidget.value);
+                    }
                 }
                 // Restore max_fps from hidden widget to custom UI
                 const maxFpsWidget = this.widgets.find(w => w.name === 'max_fps');
-                if (maxFpsWidget && typeof maxFpsWidget.value === 'number' && this.topRowWidget) {
-                    this.topRowWidget.maxFpsValue = String(maxFpsWidget.value);
+                if (maxFpsWidget) {
+                    // Sanitize: ensure valid float value
+                    if (typeof maxFpsWidget.value !== 'number' || isNaN(maxFpsWidget.value)) {
+                        maxFpsWidget.value = 0;
+                    }
+                    if (this.topRowWidget) {
+                        this.topRowWidget.maxFpsValue = String(maxFpsWidget.value);
+                    }
                 }
             };
 

@@ -94,6 +94,7 @@ class PowerLoadVideo:
         - IMAGE: Tensor of shape [frame_count, height, width, 3]
         - AUDIO: Audio waveform dict {"waveform", "sample_rate"}
         - FPS: Vide real FPS
+        - METADATA: Dict containing frame boundaries, fps settings, and crop info
     """
 
     @classmethod
@@ -118,16 +119,17 @@ class PowerLoadVideo:
                 "crop_y": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
                 "crop_w": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 1, "step": 0.01}),
                 "crop_h": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 1, "step": 0.01}),
+                "metadata": ("METADATA",),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FPS")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "FPS", "METADATA")
     FUNCTION = "load_video"
     OUTPUT_NODE = True
     CATEGORY = "Power/Video"
-    DESCRIPTION = "Load a video file via drag-and-drop. Outputs frames as IMAGE tensor, audio, and FPS."
+    DESCRIPTION = "Load a video file via drag-and-drop. Outputs frames as IMAGE tensor, audio, FPS, and metadata."
 
-    def load_video(self, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0):
+    def load_video(self, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, metadata=None):
         """
         Load video frames and audio from uploaded video file.
 
@@ -138,10 +140,27 @@ class PowerLoadVideo:
             force_fps: Force output FPS (0 = native). Same logic as VHS force_rate.
             max_fps: Maximum output frames (0 = disabled). Calculates required source frames
                     based on FPS conversion ratio. Ignores end_frame trim when set.
+            metadata: Optional METADATA dict from another PowerLoadVideo or ChainEditVideo node.
+                     If provided and contains crop info, will apply the same crop to this video.
 
         Returns:
-            tuple: (IMAGE tensor, AUDIO dict, fps)
+            tuple: (IMAGE tensor, AUDIO dict, fps, metadata_dict)
         """
+
+        # Extract crop settings from metadata if provided
+        if metadata is not None and isinstance(metadata, dict):
+            meta_crop_enabled = metadata.get("crop_enabled", False)
+            if meta_crop_enabled:
+                crop_x = metadata.get("crop_x", 0.5)
+                crop_y = metadata.get("crop_y", 0.5)
+                crop_w = metadata.get("crop_w", 1.0)
+                crop_h = metadata.get("crop_h", 1.0)
+                crop_enabled = True
+
+            # Apply start_offset from metadata (adds to starting trim frame number)
+            meta_start_offset = metadata.get("start_offset", 0)
+            if meta_start_offset != 0:
+                start_frame = start_frame + meta_start_offset
         video_filename = video
 
         # Handle force_fps type coercion (ComfyUI may pass empty dict for optional params)
@@ -310,7 +329,23 @@ class PowerLoadVideo:
             audio_duration = (last_idx - first_idx + 1) / native_fps
             audio = extract_audio(filename, audio_start_time, audio_duration)
 
-        return (image_tensor, audio, target_fps)
+        # Build metadata dict (note: start_offset is NOT included in output as it's a transient adjustment)
+        video_metadata = {
+            "start_frame": start_frame,
+            "end_frame": end_frame if end_frame != -1 else total_frames,
+            "max_fps": max_fps,
+            "force_fps": force_fps,
+            "native_fps": native_fps,
+            "target_fps": target_fps,
+            "total_frames": total_frames,
+            "crop_enabled": crop_enabled,
+            "crop_x": crop_x,
+            "crop_y": crop_y,
+            "crop_w": crop_w,
+            "crop_h": crop_h,
+        }
+
+        return (image_tensor, audio, target_fps, video_metadata)
 
     def pil_totensor(self, images):
         """Convert list of PIL Images to PyTorch tensor [N, H, W, C] in [0, 1]."""
@@ -322,7 +357,7 @@ class PowerLoadVideo:
         return torch.from_numpy(stacked)
 
     @classmethod
-    def IS_CHANGED(s, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0):
+    def IS_CHANGED(s, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, metadata=None):
         if not video:
             return 0
         try:
@@ -360,6 +395,9 @@ class PowerLoadVideo:
             m.update(f"{crop_y:.4f}".encode())
             m.update(f"{crop_w:.4f}".encode())
             m.update(f"{crop_h:.4f}".encode())
+            # Include metadata hash if provided
+            if metadata is not None and isinstance(metadata, dict):
+                m.update(str(tuple(sorted(metadata.items()))).encode())
             return m.digest().hex()
         except:
             return 0

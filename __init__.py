@@ -8,6 +8,7 @@ from .nodes.power_loaders import *
 from .nodes.decode_overlap import *
 
 from .nodes.power_load_video import *
+from .nodes.chain_edit_video import *
 from .nodes.power_spline_editor import *
 from .nodes.prepare_refs import *
 from .nodes.video_inpaint import *
@@ -18,7 +19,6 @@ from .nodes.lora_merge_ltx import *
 from .nodes.lora_change import *
 from .nodes.lora_combine import *
 from .nodes.math_nodes import *
-from .nodes.text_nodes import *
 
 from .nodes.draw_shapes import *
 from .nodes.draw_joints import *
@@ -32,6 +32,8 @@ from .nodes.wan_first_middle_last import *
 
 from .nodes.vace_utils import *
 from .nodes.cache_samples import *
+from .nodes.text import *
+from .nodes.power_crop_image import *
 
 
 # Import API endpoints to register routes

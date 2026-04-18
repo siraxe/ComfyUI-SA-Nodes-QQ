@@ -1,11 +1,49 @@
 import torch
-import torch.nn.functional as F # Added F
+import torch.nn.functional as F  # Added F
 import folder_paths
 from PIL import Image
 import numpy as np
 import cv2
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
+
+# Add parent directory to path for comfy imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import comfy.model_management
+
+# Constants
+MAX_RESOLUTION = 8192
+
+class ImageRGB:
+    def __init__(self, device="cpu"):
+        self.device = device
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "width": ("INT", {"default": 512, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
+                              "height": ("INT", {"default": 512, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
+                              "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+                              "color_rgb": ("STRING", {"default": "128,128,128"})
+                              }}
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "generate"
+
+    CATEGORY = "image"
+
+    def generate(self, width, height, batch_size=1, color_rgb="255,255,255"):
+        # Parse RGB string "R,G,B" into integers
+        try:
+            r_val, g_val, b_val = map(int, color_rgb.split(','))
+        except ValueError:
+            raise ValueError("color_rgb must be in format 'R,G,B' (e.g., '128,128,128')")
+
+        dtype = comfy.model_management.intermediate_dtype()
+        device = comfy.model_management.intermediate_device()
+        r = torch.full([batch_size, height, width, 1], r_val / 0xFF, device=device, dtype=dtype)
+        g = torch.full([batch_size, height, width, 1], g_val / 0xFF, device=device, dtype=dtype)
+        b = torch.full([batch_size, height, width, 1], b_val / 0xFF, device=device, dtype=dtype)
+        return (torch.cat((r, g, b), dim=-1), )
 
 class ImageBlend_GPU:
     # Moved blend modes inside the class
