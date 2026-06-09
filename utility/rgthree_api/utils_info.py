@@ -54,12 +54,29 @@ def get_info_file(file_path: str, model_type: str, force=False):
     """ Returns the path to the info file.
         Saves JSON files with lora name in _power_preview folder inside the model_type folder.
     """
-    base_dir = folder_paths.get_folder_paths(model_type)[0]
+    # Find the base dir that actually contains file_path. On Windows, os.path.relpath raises
+    # ValueError when path and start are on different drive letters (e.g. C: vs M:), so we
+    # iterate all registered folders and skip cross-drive candidates.
+    base_dir = None
+    relative_path = None
+    for candidate in folder_paths.get_folder_paths(model_type):
+        try:
+            rel = os.path.relpath(file_path, candidate)
+            if not rel.startswith('..'):
+                base_dir = candidate
+                relative_path = rel
+                break
+        except ValueError:
+            continue
+
+    if base_dir is None:
+        # Fallback: no candidate shares a drive with file_path; use first dir and filename only.
+        base_dir = folder_paths.get_folder_paths(model_type)[0]
+        relative_path = os.path.basename(file_path)
 
     # Create a mirrored folder structure in loras/_power_preview
     power_preview_dir = os.path.join(base_dir, '_power_preview')
 
-    relative_path = os.path.relpath(file_path, base_dir)
     # Get the filename without extension and change to .json
     filename_without_ext = os.path.splitext(os.path.basename(relative_path))[0]
     relative_dir = os.path.dirname(relative_path)
