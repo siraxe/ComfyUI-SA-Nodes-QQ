@@ -1,3 +1,24 @@
+class TextMultiline:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "", "multiline": True}),
+                "strip_newlines": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "stringify"
+    CATEGORY = "QQ/text"
+
+    def stringify(self, text, strip_newlines):
+        if strip_newlines:
+            text = text.replace("\n", "")
+        return (text,)
+
+
 class TextConcatMulti:
     @classmethod
     def INPUT_TYPES(s):

@@ -33,6 +33,7 @@ from .nodes.wan_first_middle_last import *
 from .nodes.vace_utils import *
 from .nodes.cache_samples import *
 from .nodes.text import *
+from .nodes.h3_text import *
 from .nodes.power_crop_image import *
 
 

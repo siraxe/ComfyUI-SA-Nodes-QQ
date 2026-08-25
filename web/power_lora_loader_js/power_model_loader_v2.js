@@ -408,7 +408,7 @@ app.registerExtension({
                 widget.callback = (value) => {
                     // Trigger node execution when value changes
                     if (this.onWidgetChanged) {
-                        this.onWidgetChanged(widget.name, value, widget.value);
+                        this.onWidgetChanged(widget.name, value, widget.value, widget);
                     }
                 };
                 this.addCustomWidget(widget);
