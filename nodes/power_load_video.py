@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import torch
+import torch.nn.functional as F
 import folder_paths
 
 
@@ -39,6 +40,18 @@ def _to_float(val, default):
         return float(val)
     try:
         return float(val) if val else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _to_int(val, default):
+    """Coerce a value to int, handling dict and invalid types."""
+    if isinstance(val, dict) or isinstance(val, bool):
+        return default
+    if isinstance(val, (int, float)):
+        return int(val)
+    try:
+        return int(val) if val else default
     except (ValueError, TypeError):
         return default
 
@@ -93,8 +106,8 @@ class PowerLoadVideo:
     Outputs:
         - IMAGE: Tensor of shape [frame_count, height, width, 3]
         - AUDIO: Audio waveform dict {"waveform", "sample_rate"}
-        - FPS: Vide real FPS
-        - METADATA: Dict containing frame boundaries, fps settings, and crop info
+        - frame_count (INT): count of frames in the output
+        - METADATA: Dict containing frame boundaries, fps settings, crop info, and final output dimensions
     """
 
     @classmethod
@@ -119,17 +132,20 @@ class PowerLoadVideo:
                 "crop_y": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.01}),
                 "crop_w": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 1, "step": 0.01}),
                 "crop_h": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 1, "step": 0.01}),
+                "width": ("INT", {"default": 0," min": 128, "step": 32, "forceInput": True}),
+                "height": ("INT", {"default": 0," min": 128, "step": 32, "forceInput": True}),
                 "metadata": ("METADATA",),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FPS", "METADATA")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "METADATA")
+    RETURN_NAMES = ("image", "audio", "frame_count", "metadata")
     FUNCTION = "load_video"
     OUTPUT_NODE = True
     CATEGORY = "Power/Video"
-    DESCRIPTION = "Load a video file via drag-and-drop. Outputs frames as IMAGE tensor, audio, FPS, and metadata."
+    DESCRIPTION = "Load a video file via drag-and-drop. Outputs frames as IMAGE tensor, audio, frame count, and metadata."
 
-    def load_video(self, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, metadata=None):
+    def load_video(self, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, width=None, height=None, metadata=None):
         """
         Load video frames and audio from uploaded video file.
 
@@ -140,11 +156,19 @@ class PowerLoadVideo:
             force_fps: Force output FPS (0 = native). Same logic as VHS force_rate.
             max_fps: Maximum output frames (0 = disabled). Calculates required source frames
                     based on FPS conversion ratio. Ignores end_frame trim when set.
+            width: Optional target output width (0/None = disabled). Applied after crop.
+                    If only one of width/height is set, the other is computed proportionally.
+                    Final size is snapped to the closest dimensions divisible by 32.
+                    Frames are LANCZOS-scaled to cover the target (no stretching) and
+                    center-cropped to it.
+            height: Optional target output height (0/None = disabled). Same rules as width.
             metadata: Optional METADATA dict from another PowerLoadVideo or ChainEditVideo node.
                      If provided and contains crop info, will apply the same crop to this video.
+                     If the source was resized via width/height inputs (resized=True),
+                     applies the same resize so outputs match dimensions.
 
         Returns:
-            tuple: (IMAGE tensor, AUDIO dict, fps, metadata_dict)
+            tuple: (IMAGE tensor, AUDIO dict, frame_count INT, metadata_dict)
         """
 
         # Extract crop settings from metadata if provided
@@ -156,6 +180,11 @@ class PowerLoadVideo:
                 crop_w = metadata.get("crop_w", 1.0)
                 crop_h = metadata.get("crop_h", 1.0)
                 crop_enabled = True
+
+            # Apply the same resize as the source node if it was resized via width/height inputs
+            if metadata.get("resized", False):
+                width = metadata.get("width") or 0
+                height = metadata.get("height") or 0
 
             # Apply start_offset from metadata (adds to starting trim frame number)
             meta_start_offset = metadata.get("start_offset", 0)
@@ -320,6 +349,35 @@ class PowerLoadVideo:
                     bottom = top + snapped_h
                 image_tensor = image_tensor[:, top:bottom, left:right, :]
 
+        # Apply width/height resize if provided (after crop, so both can work together)
+        target_w = _to_int(width, 0)
+        target_h = _to_int(height, 0)
+        resized = False
+        if target_w > 0 or target_h > 0:
+            resized = True
+            cur_h, cur_w = image_tensor.shape[1], image_tensor.shape[2]
+            if target_w > 0 and target_h > 0:
+                pass  # use both as-is
+            elif target_w > 0:
+                target_h = int(round(target_w * cur_h / cur_w))
+            else:
+                target_w = int(round(target_h * cur_w / cur_h))
+            # Snap to closest dimensions divisible by 32 (min 32)
+            target_w = max(32, int(round(target_w / 32)) * 32)
+            target_h = max(32, int(round(target_h / 32)) * 32)
+            if (target_w, target_h) != (cur_w, cur_h):
+                # No stretching: LANCZOS-scale to COVER the target size (aspect ratio
+                # preserved), then center-crop to the exact target dimensions.
+                scale = max(target_w / cur_w, target_h / cur_h)
+                new_w = int(round(cur_w * scale))
+                new_h = int(round(cur_h * scale))
+                t = image_tensor.permute(0, 3, 1, 2)
+                t = F.interpolate(t, size=(new_h, new_w), mode="lanczos", antialias=True)
+                t = t.permute(0, 2, 3, 1).contiguous()
+                left = (new_w - target_w) // 2
+                top = (new_h - target_h) // 2
+                image_tensor = t[:, top:top + target_h, left:left + target_w, :]
+
         # Extract audio (skip trimming if full video)
         audio = None
         if full_video:
@@ -343,9 +401,15 @@ class PowerLoadVideo:
             "crop_y": crop_y,
             "crop_w": crop_w,
             "crop_h": crop_h,
+            # Final output frame dimensions (after crop + optional resize)
+            "width": image_tensor.shape[2],
+            "height": image_tensor.shape[1],
+            # True if this node was resized via width/height inputs - chained nodes
+            # receiving this metadata will apply the same resize
+            "resized": resized,
         }
 
-        return (image_tensor, audio, target_fps, video_metadata)
+        return (image_tensor, audio, image_tensor.shape[0], video_metadata)
 
     def pil_totensor(self, images):
         """Convert list of PIL Images to PyTorch tensor [N, H, W, C] in [0, 1]."""
@@ -357,7 +421,7 @@ class PowerLoadVideo:
         return torch.from_numpy(stacked)
 
     @classmethod
-    def IS_CHANGED(s, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, metadata=None):
+    def IS_CHANGED(s, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, width=None, height=None, metadata=None):
         if not video:
             return 0
         try:
@@ -395,6 +459,9 @@ class PowerLoadVideo:
             m.update(f"{crop_y:.4f}".encode())
             m.update(f"{crop_w:.4f}".encode())
             m.update(f"{crop_h:.4f}".encode())
+            # Include width/height in hash so changing them triggers re-execution
+            m.update(str(_to_int(width, 0)).encode())
+            m.update(str(_to_int(height, 0)).encode())
             # Include metadata hash if provided
             if metadata is not None and isinstance(metadata, dict):
                 m.update(str(tuple(sorted(metadata.items()))).encode())

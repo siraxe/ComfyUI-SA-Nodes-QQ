@@ -132,11 +132,40 @@ function installNode(nodeType) {
         return result;
     };
 
+    // Rebuild the editor within one frame if its DOM was detached (e.g. a
+    // workspace-tab switch that rebuilds node widget DOM). Mirrors Easy's
+    // onDrawForeground recovery so text never visibly blanks out. Must null the
+    // stale refs first: installPromptEditorFactory early-returns when
+    // __h3qqEditor is set, even if that element has left the document.
+    const originalDraw = nodeType.prototype.onDrawForeground;
+    nodeType.prototype.onDrawForeground = function onDrawForegroundH3QQ(ctx) {
+        const result = originalDraw?.apply(this, arguments);
+        // Only recover an editor that WAS installed and then detached. A null
+        // editor means the initial-install retry path (onNodeCreated/onConfigure)
+        // still owns reinstallation; acting here would race it per frame.
+        const editor = this.__h3qqEditor;
+        if (!editor || document.contains(editor)) return result;
+        if (this.__h3qqHealPending || this.__h3qqHookRetry) return result; // already recovering
+        this.__h3qqHealPending = true;
+        const self = this;
+        const run = () => {
+            self.__h3qqHealPending = false;
+            if (!app.graph?.getNodeById?.(self.id)) return; // node removed while pending
+            if (self.__h3qqEditor && document.contains(self.__h3qqEditor)) return; // healed meanwhile
+            self.__h3qqEditor = null;
+            self.__h3qqEditorWrap = null;
+            installPromptEditorSoon(self);
+        };
+        (typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout)(run, 0);
+        return result;
+    };
+
     const originalRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function onRemovedH3QQ() {
         closeMentionMenu(this);
         if (this.__h3qqHookRetry) clearTimeout(this.__h3qqHookRetry);
         this.__h3qqHookRetry = null;
+        this.__h3qqHealPending = false;
         this.__h3qqHookAttempts = 0;
         this.__h3qqEditor = null;
         this.__h3qqEditorWrap = null;

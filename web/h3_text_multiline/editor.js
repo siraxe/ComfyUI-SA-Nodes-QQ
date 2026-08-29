@@ -1,5 +1,5 @@
 import { app } from "../../../scripts/app.js";
-import { TYPE_LABELS, TYPE_COLORS, COLOR_IMAGE, TEXT, getWidget, isReferenceMode } from "./h3_text_multiline.js";
+import { NODE_CLASS, TYPE_LABELS, TYPE_COLORS, COLOR_IMAGE, TEXT, getWidget, isReferenceMode } from "./h3_text_multiline.js";
 import { normalizeLinks } from "./links.js";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +62,53 @@ border-left:6px solid rgba(255,255,255,.9);border-top:4px solid transparent;bord
 const AUDIO_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>';
 const CHIP_CLASS = "h3qq-mention-chip";
 const TOKEN_RE = /@(Picture|Video|Audio)\s+(\d+)/g;
+
+// Self-heal state: when the contentEditable widget is detached (e.g. after a
+// tab/workspace switch that rebuilds node DOM) its text appears lost even
+// though the hidden "text" widget still holds it. Snapshot on every sync and
+// restore+rebuild if the editor element ever ends up outside the document.
+const HEAL_INTERVAL_MS = 3000;
+let healTimerId = null;
+
+function getWidgetValueLocal(node) {
+    return String(getWidget(node, "text")?.value ?? "");
+}
+
+function snapshotNodeText(node) {
+    const value = getWidgetValueLocal(node);
+    node.properties ||= {};
+    if (node.properties.__h3qqLastSyncedText !== value) node.properties.__h3qqLastSyncedText = value;
+}
+
+function installSelfHeal() {
+    if (typeof document === "undefined" || healTimerId != null) return;
+    const onVisibility = () => { if (!document.hidden) check(); };
+    const stop = () => { clearInterval(healTimerId); healTimerId = null; document.removeEventListener("visibilitychange", onVisibility); };
+    const check = () => {
+        let hasH3Node = false;
+        for (const node of app.graph?._nodes || []) {
+            if (String(node?.comfyClass || node?.type) !== NODE_CLASS) continue;
+            hasH3Node = true;
+            if (!node.__h3qqEditor || !document.contains(node.__h3qqEditor)) continue;
+            const text = getWidgetValueLocal(node);
+            const snapshot = String(node.properties?.__h3qqLastSyncedText ?? "");
+            // The DOM is gone while the value lives on: restore it (only when
+            // a real snapshot exists so we never clobber fresh content), then
+            // rebuild the editor so text is visible again.
+            if (text === "" && snapshot !== "") {
+                const widget = getWidget(node, "text");
+                if (widget) widget.value = snapshot;
+            }
+            node.__h3qqEditor = null;
+            node.__h3qqEditorWrap = null;
+            installPromptEditorFactory(node);
+            snapshotNodeText(node);
+        }
+        if (!hasH3Node) stop();
+    };
+    healTimerId = setInterval(check, HEAL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisibility);
+}
 
 function setWidgetOption(widget, key, value) {
     if (!widget) return;
@@ -221,6 +268,7 @@ export function renderEditorFromNode(node, force = false) {
         if (token.type === "mention") editor.append(makeMentionChip(token.option));
         else appendTextWithBreaks(editor, token.value);
     }
+    snapshotNodeText(node);
 }
 
 function serializeEditorText(editor) {
@@ -251,6 +299,7 @@ function syncEditorFromNode(node) {
     if (!editor || !widget) return;
     const text = serializeEditorText(editor);
     if (String(widget.value ?? "") !== text) widget.value = text;
+    snapshotNodeText(node);
     node.setDirtyCanvas?.(true, true);
     app.graph?.change?.();
 }
@@ -701,6 +750,10 @@ function installPromptEditorFactory(node) {
     domWidget.serialize = false;
     setWidgetOption(domWidget, "serialize", false);
     setWidgetOption(domWidget, "canvasOnly", false);
+    // A healthy editor means any earlier retry delay has no business carrying
+    // over: the next detach must recover fast again, not with a 2 s backoff.
+    node.__h3qqHookAttempts = 0;
+    installSelfHeal();
     // Keep the editor row directly under the (now hidden) text widget.
     const domIndex = node.widgets?.indexOf(domWidget) ?? -1;
     const textIndex = node.widgets?.indexOf(widget) ?? -1;
