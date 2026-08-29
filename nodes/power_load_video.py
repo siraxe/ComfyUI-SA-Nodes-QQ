@@ -56,6 +56,68 @@ def _to_int(val, default):
         return default
 
 
+def _is_input_linked(prompt, unique_id, input_name):
+    """Robustly check whether an input is connected to another node's output.
+
+    In the raw ComfyUI prompt, linked inputs are stored as [from_node, slot]
+    lists while unconnected widget values are plain scalars (or absent).
+    Checking the raw prompt works regardless of what value a widget holds
+    when unlinked (e.g. its default), so it is a reliable "is connected" test.
+    """
+    try:
+        val = prompt[unique_id]["inputs"][input_name]
+    except (TypeError, KeyError):
+        return False
+    if not isinstance(val, list) or len(val) != 2:
+        return False
+    # A link reference is [node_id, slot_index]
+    return isinstance(val[1], int)
+
+
+def _snap32(v):
+    """Snap a dimension to the closest value divisible by 32 (min 32)."""
+    return max(32, int(round(v / 32)) * 32)
+
+
+def _resolve_target_size(target_w, target_h, cur_w, cur_h):
+    """Fill in a missing side proportionally from the current aspect ratio,
+    then snap both sides to dimensions divisible by 32."""
+    if target_w > 0 and target_h > 0:
+        pass
+    elif target_w > 0:
+        target_h = int(round(target_w * cur_h / cur_w))
+    else:
+        target_w = int(round(target_h * cur_w / cur_h))
+    return _snap32(target_w), _snap32(target_h)
+
+
+def _lanczos_cover(tensor, target_w, target_h):
+    """LANCZOS-scale to COVER the target size (aspect ratio preserved, no
+    stretching), then center-crop to the exact target dimensions."""
+    cur_h, cur_w = tensor.shape[1], tensor.shape[2]
+    if (target_w, target_h) == (cur_w, cur_h):
+        return tensor
+    scale = max(target_w / cur_w, target_h / cur_h)
+    new_w = int(round(cur_w * scale))
+    new_h = int(round(cur_h * scale))
+    t = tensor.permute(0, 3, 1, 2)
+    t = F.interpolate(t, size=(new_h, new_w), mode="lanczos", antialias=True)
+    t = t.permute(0, 2, 3, 1).contiguous()
+    left = (new_w - target_w) // 2
+    top = (new_h - target_h) // 2
+    return t[:, top:top + target_h, left:left + target_w, :]
+
+
+def _lanczos_stretch(tensor, target_w, target_h):
+    """LANCZOS-scale to the EXACT target size (stretch mode, no cropping)."""
+    cur_h, cur_w = tensor.shape[1], tensor.shape[2]
+    if (target_w, target_h) == (cur_w, cur_h):
+        return tensor
+    t = tensor.permute(0, 3, 1, 2)
+    t = F.interpolate(t, size=(target_h, target_w), mode="lanczos", antialias=True)
+    return t.permute(0, 2, 3, 1).contiguous()
+
+
 def extract_audio(file_path, start_time=0, duration=0):
     """Extract audio from a video file using ffmpeg.
 
@@ -134,18 +196,22 @@ class PowerLoadVideo:
                 "crop_h": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 1, "step": 0.01}),
                 "width": ("INT", {"default": 0," min": 128, "step": 32, "forceInput": True}),
                 "height": ("INT", {"default": 0," min": 128, "step": 32, "forceInput": True}),
+                "high_size": ("FLOAT", {"default": 1.0, "step": 0.1, "forceInput": True}),
                 "metadata": ("METADATA",),
             },
+            # Hidden inputs: used to robustly detect whether high_size is
+            # actually connected (linked inputs appear as [node, slot] in the raw prompt)
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "METADATA")
-    RETURN_NAMES = ("image", "audio", "frame_count", "metadata")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "AUDIO", "INT", "METADATA")
+    RETURN_NAMES = ("image", "high_images", "audio", "frame_count", "metadata")
     FUNCTION = "load_video"
     OUTPUT_NODE = True
     CATEGORY = "Power/Video"
     DESCRIPTION = "Load a video file via drag-and-drop. Outputs frames as IMAGE tensor, audio, frame count, and metadata."
 
-    def load_video(self, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, width=None, height=None, metadata=None):
+    def load_video(self, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, width=None, height=None, high_size=1.0, metadata=None, prompt=None, unique_id=None):
         """
         Load video frames and audio from uploaded video file.
 
@@ -162,14 +228,33 @@ class PowerLoadVideo:
                     Frames are LANCZOS-scaled to cover the target (no stretching) and
                     center-cropped to it.
             height: Optional target output height (0/None = disabled). Same rules as width.
+            high_size: Link-only (forceInput) FLOAT multiplier for the high-res output.
+                     Active when ACTUALLY CONNECTED (or inherited from incoming
+                     METADATA produced by a node with an active high_size - a
+                     direct connection always wins) and at least one of
+                     width/height is connected. high_images are produced at
+                     width*high_size x height*high_size (32-divisible, cover +
+                     center-crop when both sides given); the regular image output
+                     then becomes an exact LANCZOS downscale (stretch mode) of
+                     high_images to the base width/height target, so both outputs
+                     stay pixel-aligned. When inactive, high_images simply
+                     mirrors image and nothing else changes.
             metadata: Optional METADATA dict from another PowerLoadVideo or ChainEditVideo node.
                      If provided and contains crop info, will apply the same crop to this video.
                      If the source was resized via width/height inputs (resized=True),
                      applies the same resize so outputs match dimensions.
+            prompt/unique_id: Hidden inputs (raw prompt + node id) used only to
+                     detect whether high_size is connected.
 
         Returns:
-            tuple: (IMAGE tensor, AUDIO dict, frame_count INT, metadata_dict)
+            tuple: (IMAGE tensor, high IMAGE tensor, AUDIO dict, frame_count INT, metadata_dict)
         """
+
+        # high_size inherited from upstream metadata (0 = none), plus the
+        # source node's exact high-res output dimensions when available
+        meta_high_size = 0.0
+        meta_high_w = 0
+        meta_high_h = 0
 
         # Extract crop settings from metadata if provided
         if metadata is not None and isinstance(metadata, dict):
@@ -190,6 +275,14 @@ class PowerLoadVideo:
             meta_start_offset = metadata.get("start_offset", 0)
             if meta_start_offset != 0:
                 start_frame = start_frame + meta_start_offset
+
+            # Inherit high-res scaling from the source node so chained nodes
+            # produce matching high_images (a direct high_size connection on
+            # this node always takes precedence over the inherited value)
+            if metadata.get("high_resized", False):
+                meta_high_size = _to_float(metadata.get("high_size", 0.0), 0.0)
+                meta_high_w = _to_int(metadata.get("high_width", 0), 0)
+                meta_high_h = _to_int(metadata.get("high_height", 0), 0)
         video_filename = video
 
         # Handle force_fps type coercion (ComfyUI may pass empty dict for optional params)
@@ -353,30 +446,55 @@ class PowerLoadVideo:
         target_w = _to_int(width, 0)
         target_h = _to_int(height, 0)
         resized = False
-        if target_w > 0 or target_h > 0:
+        high_tensor = None
+
+        # High-res dual output: active when high_size is actually connected to
+        # this node (checked via the raw prompt, so an unlinked widget default
+        # can never trigger it), OR inherited from upstream metadata (chained
+        # PowerLoadVideo). A direct connection always wins over inheritance.
+        # In either case at least one of width/height must be connected.
+        local_high_linked = _is_input_linked(prompt, unique_id, "high_size")
+        hs = _to_float(high_size, 0.0) if local_high_linked else meta_high_size
+
+        high_active = hs > 0 and (target_w > 0 or target_h > 0)
+
+        if high_active:
+            cur_h, cur_w = image_tensor.shape[1], image_tensor.shape[2]
+            if local_high_linked:
+                # High-res target: base width/height multiplied by high_size.
+                # Missing side (if only one of width/height is connected) is
+                # computed proportionally from the current aspect ratio; both
+                # sides snapped to 32.
+                high_w = int(round(target_w * hs)) if target_w > 0 else 0
+                high_h = int(round(target_h * hs)) if target_h > 0 else 0
+                high_w, high_h = _resolve_target_size(high_w, high_h, cur_w, cur_h)
+            elif meta_high_w > 0 and meta_high_h > 0:
+                # Inherited: use the source node's exact high-res dimensions so
+                # chained nodes always match (recomputing base*high_size could
+                # diverge when only one side is connected, since each side is
+                # snapped to 32 independently)
+                high_w, high_h = meta_high_w, meta_high_h
+            else:
+                # Fallback for older metadata without stored high dimensions
+                high_w = int(round(target_w * hs)) if target_w > 0 else 0
+                high_h = int(round(target_h * hs)) if target_h > 0 else 0
+                high_w, high_h = _resolve_target_size(high_w, high_h, cur_w, cur_h)
+            # Cover-scale + center-crop (crop happens when both sides are supplied)
+            high_tensor = _lanczos_cover(image_tensor, high_w, high_h)
+            # Small output: exact LANCZOS scale of the high-res result down to the
+            # base target (stretch mode, no crop, still 32-divisible) so that
+            # image and high_images stay pixel-aligned.
+            small_w, small_h = _resolve_target_size(target_w, target_h, cur_w, cur_h)
+            image_tensor = _lanczos_stretch(high_tensor, small_w, small_h)
+            resized = True
+        elif target_w > 0 or target_h > 0:
+            # Normal single-output resize (high_size not connected)
             resized = True
             cur_h, cur_w = image_tensor.shape[1], image_tensor.shape[2]
-            if target_w > 0 and target_h > 0:
-                pass  # use both as-is
-            elif target_w > 0:
-                target_h = int(round(target_w * cur_h / cur_w))
-            else:
-                target_w = int(round(target_h * cur_w / cur_h))
-            # Snap to closest dimensions divisible by 32 (min 32)
-            target_w = max(32, int(round(target_w / 32)) * 32)
-            target_h = max(32, int(round(target_h / 32)) * 32)
-            if (target_w, target_h) != (cur_w, cur_h):
-                # No stretching: LANCZOS-scale to COVER the target size (aspect ratio
-                # preserved), then center-crop to the exact target dimensions.
-                scale = max(target_w / cur_w, target_h / cur_h)
-                new_w = int(round(cur_w * scale))
-                new_h = int(round(cur_h * scale))
-                t = image_tensor.permute(0, 3, 1, 2)
-                t = F.interpolate(t, size=(new_h, new_w), mode="lanczos", antialias=True)
-                t = t.permute(0, 2, 3, 1).contiguous()
-                left = (new_w - target_w) // 2
-                top = (new_h - target_h) // 2
-                image_tensor = t[:, top:top + target_h, left:left + target_w, :]
+            target_w, target_h = _resolve_target_size(target_w, target_h, cur_w, cur_h)
+            # No stretching: LANCZOS-scale to COVER the target size (aspect ratio
+            # preserved), then center-crop to the exact target dimensions.
+            image_tensor = _lanczos_cover(image_tensor, target_w, target_h)
 
         # Extract audio (skip trimming if full video)
         audio = None
@@ -407,9 +525,18 @@ class PowerLoadVideo:
             # True if this node was resized via width/height inputs - chained nodes
             # receiving this metadata will apply the same resize
             "resized": resized,
+            # High-res dual output info - chained nodes receiving this metadata
+            # will apply the same high_size scaling to their own high_images
+            # (unless they have a direct high_size connection of their own).
+            # The exact high dimensions are stored so chains match exactly.
+            "high_resized": high_active,
+            "high_size": hs if high_active else 0,
+            "high_width": high_tensor.shape[2] if high_active else 0,
+            "high_height": high_tensor.shape[1] if high_active else 0,
         }
 
-        return (image_tensor, audio, image_tensor.shape[0], video_metadata)
+        # high_images mirrors the regular image unless the high-res path was active
+        return (image_tensor, high_tensor if high_active else image_tensor, audio, image_tensor.shape[0], video_metadata)
 
     def pil_totensor(self, images):
         """Convert list of PIL Images to PyTorch tensor [N, H, W, C] in [0, 1]."""
@@ -421,7 +548,7 @@ class PowerLoadVideo:
         return torch.from_numpy(stacked)
 
     @classmethod
-    def IS_CHANGED(s, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, width=None, height=None, metadata=None):
+    def IS_CHANGED(s, video=None, start_frame=1, end_frame=-1, force_fps=0, max_fps=0, crop_enabled=False, crop_x=0.5, crop_y=0.5, crop_w=1.0, crop_h=1.0, width=None, height=None, high_size=1.0, metadata=None, prompt=None, unique_id=None):
         if not video:
             return 0
         try:
@@ -462,6 +589,12 @@ class PowerLoadVideo:
             # Include width/height in hash so changing them triggers re-execution
             m.update(str(_to_int(width, 0)).encode())
             m.update(str(_to_int(height, 0)).encode())
+            # Include high_size connection state + value so connecting/disconnecting
+            # it or changing the multiplier triggers re-execution
+            high_linked = _is_input_linked(prompt, unique_id, "high_size")
+            m.update(str(high_linked).encode())
+            if high_linked:
+                m.update(f"{_to_float(high_size, 1.0):.6f}".encode())
             # Include metadata hash if provided
             if metadata is not None and isinstance(metadata, dict):
                 m.update(str(tuple(sorted(metadata.items()))).encode())

@@ -19,20 +19,20 @@ export function createOnNodeCreatedWrapper(originalOnNodeCreated, nodeData) {
         }
 
         // Enforce minimum width and max height
-        if (this.size[0] < 620) {
-            this.size[0] = 620;
+        if (this.size[0] < 640) {
+            this.size[0] = 640;
         }
-        if (this.size[1] > 565) {
-            this.size[1] = 565;
+        if (this.size[1] > 585) {
+            this.size[1] = 585;
         }
 
         // Enforce min width and max height on resize
         this.onResize = function(size) {
-            if (size[0] < 620) {
-                size[0] = 620;
+            if (size[0] < 640) {
+                size[0] = 640;
             }
-            if (size[1] > 565) {
-                size[1] = 565;
+            if (size[1] > 585) {
+                size[1] = 585;
             }
         };
 
