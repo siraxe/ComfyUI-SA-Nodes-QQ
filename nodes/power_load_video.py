@@ -91,6 +91,19 @@ def _resolve_target_size(target_w, target_h, cur_w, cur_h):
     return _snap32(target_w), _snap32(target_h)
 
 
+def _lanczos_scale(t, size):
+    """Version-tolerant LANCZOS interpolate (expects NCHW tensor).
+
+    Newer PyTorch (>= ~2.5) requires antialias=True for lanczos; older
+    PyTorch rejects it ("restricted to bilinear and bicubic modes").
+    Try the new behavior first, fall back to the old one.
+    """
+    try:
+        return F.interpolate(t, size=size, mode="lanczos", antialias=True)
+    except ValueError:
+        return F.interpolate(t, size=size, mode="lanczos")
+
+
 def _lanczos_cover(tensor, target_w, target_h):
     """LANCZOS-scale to COVER the target size (aspect ratio preserved, no
     stretching), then center-crop to the exact target dimensions."""
@@ -101,7 +114,7 @@ def _lanczos_cover(tensor, target_w, target_h):
     new_w = int(round(cur_w * scale))
     new_h = int(round(cur_h * scale))
     t = tensor.permute(0, 3, 1, 2)
-    t = F.interpolate(t, size=(new_h, new_w), mode="lanczos", antialias=True)
+    t = _lanczos_scale(t, (new_h, new_w))
     t = t.permute(0, 2, 3, 1).contiguous()
     left = (new_w - target_w) // 2
     top = (new_h - target_h) // 2
@@ -114,7 +127,7 @@ def _lanczos_stretch(tensor, target_w, target_h):
     if (target_w, target_h) == (cur_w, cur_h):
         return tensor
     t = tensor.permute(0, 3, 1, 2)
-    t = F.interpolate(t, size=(target_h, target_w), mode="lanczos", antialias=True)
+    t = _lanczos_scale(t, (target_h, target_w))
     return t.permute(0, 2, 3, 1).contiguous()
 
 
