@@ -91,17 +91,32 @@ def _resolve_target_size(target_w, target_h, cur_w, cur_h):
     return _snap32(target_w), _snap32(target_h)
 
 
-def _lanczos_scale(t, size):
-    """Version-tolerant LANCZOS interpolate (expects NCHW tensor).
+_LANCZOS_FALLBACK_WARNED = False
 
-    Newer PyTorch (>= ~2.5) requires antialias=True for lanczos; older
-    PyTorch rejects it ("restricted to bilinear and bicubic modes").
-    Try the new behavior first, fall back to the old one.
+
+def _lanczos_scale(t, size):
+    """Version/device-tolerant high-quality scale (expects NCHW tensor).
+
+    Preference order:
+      1. lanczos + antialias=True  -> new PyTorch (CPU & GPU; required there)
+      2. lanczos                   -> older PyTorch on CUDA only
+      3. bicubic + antialias=True  -> universal fallback (next-best quality,
+                                       works on CPU in all versions)
     """
+    global _LANCZOS_FALLBACK_WARNED
     try:
         return F.interpolate(t, size=size, mode="lanczos", antialias=True)
     except ValueError:
+        pass  # old PyTorch rejects antialias for lanczos
+    try:
         return F.interpolate(t, size=size, mode="lanczos")
+    except (ValueError, NotImplementedError):
+        # old PyTorch on CPU: lanczos not implemented at all
+        if not _LANCZOS_FALLBACK_WARNED:
+            print(f"[SA-Nodes-QQ] torch {torch.__version__} lacks lanczos support here; "
+                  f"using bicubic (antialias) as fallback.")
+            _LANCZOS_FALLBACK_WARNED = True
+    return F.interpolate(t, size=size, mode="bicubic", antialias=True)
 
 
 def _lanczos_cover(tensor, target_w, target_h):
