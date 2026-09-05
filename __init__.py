@@ -8,6 +8,7 @@ from .nodes.power_loaders import *
 from .nodes.decode_overlap import *
 
 from .nodes.power_load_video import *
+from .nodes.power_compare_video import *
 from .nodes.chain_edit_video import *
 from .nodes.power_spline_editor import *
 from .nodes.prepare_refs import *
