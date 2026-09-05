@@ -6,11 +6,15 @@
  * timeline UI as Power Load Video (play/pause, scrubbing, [ ] markers).
  *
  * When a second video is available (previous run's cache, or the images_b
- * input), a rgthree-Image-Comparer-style slider is drawn on the playback
- * area: the divider follows the mouse, revealing the second video on the
- * left and keeping the current one on the right. Frame counts may differ -
- * playback runs for the longer sequence while the shorter one freezes on
- * its last frame.
+ * input), the row above the playback area offers three compare modes:
+ *   - slide (default): rgthree-Image-Comparer-style slider on the playback
+ *     area - the divider follows the mouse, revealing B on the left and
+ *     keeping A on the right
+ *   - right: B placed on the right side of A
+ *   - bottom: B placed below A
+ * The same row holds an fps stepper (drag / click / prompt). Frame counts
+ * may differ - playback runs for the longer sequence while the shorter one
+ * freezes on its last frame.
  *
  * Reuses PowerLoadVideoTimelineWidget: frames are driven manually through
  * the image sequence (same code path the timeline uses for VFR videos),
@@ -20,6 +24,7 @@
 import { app } from '../../../scripts/app.js';
 import { api } from '../../../scripts/api.js';
 import { PowerLoadVideoTimelineWidget } from '../power_load_video/timeline_widget.js';
+import { PowerCompareRowWidget } from './compare_row_widget.js';
 
 app.registerExtension({
     name: 'PowerCompareVideo',
@@ -68,6 +73,41 @@ app.registerExtension({
 
                     return widget;
                 };
+            }
+
+            // === COMPARE MODE ROW (mode buttons + fps stepper) ===
+            this.compareMode = this.properties?.compare_mode || 'slide';
+
+            // Hide the default fps widget - it's edited through the row's stepper
+            const fpsWidget = this.widgets.find(w => w.name === 'fps');
+            if (fpsWidget) {
+                fpsWidget.computeSize = () => [0, 0];
+                fpsWidget.hidden = true;
+                if (typeof fpsWidget.value !== 'number' || isNaN(fpsWidget.value)) {
+                    fpsWidget.value = 24;
+                }
+            }
+
+            // Create the row widget FIRST (appears above the playback area)
+            if (!this.rowWidget) {
+                this.rowWidget = new PowerCompareRowWidget();
+                this.addCustomWidget(this.rowWidget);
+            }
+            if (fpsWidget) {
+                this.rowWidget.fpsValue = Math.max(1, Math.round(fpsWidget.value));
+            }
+
+            // Output pick (A/B): restored from properties/widget, edited via
+            // the row's pick buttons - hide the default combo widget
+            this.outputPick = this.properties?.output_pick || 'A';
+            const pickWidget = this.widgets.find(w => w.name === 'output_pick');
+            if (pickWidget) {
+                pickWidget.computeSize = () => [0, 0];
+                pickWidget.hidden = true;
+                if (pickWidget.value !== 'A' && pickWidget.value !== 'B') {
+                    pickWidget.value = 'A';
+                }
+                this.outputPick = pickWidget.value;
             }
 
             // === PLAYBACK AREA (DOM widget) ===
@@ -119,14 +159,51 @@ app.registerExtension({
             }
             this.timelineWidget.setVideoElement(dummyVideo);
 
+            // Letterbox-fit an image into a region (aspect preserved, centered)
+            const drawFit = (ctx, img, rx, ry, rw, rh) => {
+                const s = Math.min(rw / img.naturalWidth, rh / img.naturalHeight);
+                const dw = img.naturalWidth * s;
+                const dh = img.naturalHeight * s;
+                ctx.drawImage(img, rx + (rw - dw) / 2, ry + (rh - dh) / 2, dw, dh);
+            };
+
+            // White divider lines (same look as rgthree's comparer)
+            const drawDividerV = (ctx, x, h) => {
+                ctx.save();
+                ctx.globalCompositeOperation = 'difference';
+                ctx.strokeStyle = 'rgba(255,255,255,1)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                ctx.stroke();
+                ctx.restore();
+            };
+            const drawDividerH = (ctx, y, w) => {
+                ctx.save();
+                ctx.globalCompositeOperation = 'difference';
+                ctx.strokeStyle = 'rgba(255,255,255,1)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(w, y);
+                ctx.stroke();
+                ctx.restore();
+            };
+
             /**
              * Draw the frame at frameIndex (1-based) onto the display canvas.
              * Signature matches what PowerLoadVideoTimelineWidget expects.
              *
-             * A (current video) fills the canvas; B (second video) is revealed
-             * to the LEFT of the split position (rgthree Image Comparer style)
-             * with a white divider line. Both indices clamp to their own length
-             * so the shorter video freezes on its last frame.
+             * Modes (node.compareMode):
+             *  - 'slide'  (default): A fills the canvas; B is revealed to the LEFT
+             *    of the split position with a draggable divider line.
+             *  - 'right': B placed on the right side, A on the left.
+             *  - 'bottom': B placed below, A on top.
+             * Side-by-side modes render the canvas at double size in the split
+             * direction (both videos keep full resolution; CSS scales it down).
+             * Both indices clamp to their own length so the shorter video
+             * freezes on its last frame.
              */
             this.updateDisplayCanvas = (frameIndex) => {
                 const framesA = this.compareFrames;
@@ -136,49 +213,57 @@ app.registerExtension({
                 const imgA = framesA[Math.min(i, framesA.length - 1)];
                 if (!imgA || !imgA.naturalWidth) return;
 
+                const framesB = this.compareFramesB;
+                const imgB = (framesB && framesB.length) ? framesB[Math.min(i, framesB.length - 1)] : null;
+                const bReady = !!(imgB && imgB.naturalWidth);
+                const mode = this.compareMode || 'slide';
+
+                const aw = imgA.naturalWidth;
+                const ah = imgA.naturalHeight;
+                const cw = (mode === 'right' && bReady) ? aw * 2 : aw;
+                const ch = (mode === 'bottom' && bReady) ? ah * 2 : ah;
+
                 const ctx = this.displayCanvas.getContext('2d');
-                if (this.displayCanvas.width !== imgA.naturalWidth || this.displayCanvas.height !== imgA.naturalHeight) {
-                    this.displayCanvas.width = imgA.naturalWidth;
-                    this.displayCanvas.height = imgA.naturalHeight;
+                if (this.displayCanvas.width !== cw || this.displayCanvas.height !== ch) {
+                    this.displayCanvas.width = cw;
+                    this.displayCanvas.height = ch;
                 }
-                ctx.clearRect(0, 0, this.displayCanvas.width, this.displayCanvas.height);
+                ctx.clearRect(0, 0, cw, ch);
+
+                // A always fills its region (top-left)
                 ctx.drawImage(imgA, 0, 0);
 
-                const framesB = this.compareFramesB;
-                if (framesB && framesB.length && typeof this.compareSplit === 'number') {
-                    const imgB = framesB[Math.min(i, framesB.length - 1)];
-                    if (imgB && imgB.naturalWidth) {
-                        const w = this.displayCanvas.width;
-                        const h = this.displayCanvas.height;
-                        const splitX = Math.round(Math.max(0, Math.min(1, this.compareSplit)) * w);
+                if (!bReady) return;
+
+                if (mode === 'slide') {
+                    if (typeof this.compareSplit === 'number') {
+                        const splitX = Math.round(Math.max(0, Math.min(1, this.compareSplit)) * cw);
                         if (splitX > 0) {
                             // B clipped to the left of the divider (stretched to
                             // the canvas size so differing resolutions still align)
                             ctx.save();
                             ctx.beginPath();
-                            ctx.rect(0, 0, splitX, h);
+                            ctx.rect(0, 0, splitX, ch);
                             ctx.clip();
-                            ctx.drawImage(imgB, 0, 0, w, h);
+                            ctx.drawImage(imgB, 0, 0, cw, ch);
                             ctx.restore();
-
-                            // Divider line (same look as rgthree's comparer)
-                            ctx.save();
-                            ctx.globalCompositeOperation = 'difference';
-                            ctx.strokeStyle = 'rgba(255,255,255,1)';
-                            ctx.lineWidth = 2;
-                            ctx.beginPath();
-                            ctx.moveTo(splitX, 0);
-                            ctx.lineTo(splitX, h);
-                            ctx.stroke();
-                            ctx.restore();
+                            drawDividerV(ctx, splitX, ch);
                         }
                     }
+                } else if (mode === 'right') {
+                    drawFit(ctx, imgB, aw, 0, aw, ah);
+                    drawDividerV(ctx, aw, ch);
+                } else { // bottom
+                    drawFit(ctx, imgB, 0, ah, aw, ah);
+                    drawDividerH(ctx, ah, cw);
                 }
             };
 
             // Left-to-right sliding compare: the divider follows the mouse while
             // it moves over the playback area (borrowed from rgthree comparer).
+            // Only active in slide mode with a second video present.
             const updateSplitFromMouse = (e) => {
+                if ((this.compareMode || 'slide') !== 'slide') return;
                 if (!this.compareFramesB || !this.compareFramesB.length) return;
                 const rect = displayCanvas.getBoundingClientRect();
                 if (!rect.width) return;
@@ -188,7 +273,8 @@ app.registerExtension({
             };
             displayCanvas.addEventListener('mousemove', (e) => {
                 updateSplitFromMouse(e);
-                displayCanvas.style.cursor = (this.compareFramesB && this.compareFramesB.length) ? 'ew-resize' : 'default';
+                const slideActive = (this.compareMode || 'slide') === 'slide' && this.compareFramesB && this.compareFramesB.length;
+                displayCanvas.style.cursor = slideActive ? 'ew-resize' : 'default';
             });
             displayCanvas.addEventListener('mousedown', updateSplitFromMouse);
             displayCanvas.addEventListener('mouseleave', () => {
@@ -208,12 +294,6 @@ app.registerExtension({
                 }
             };
             document.addEventListener('keydown', this.handlePlayPauseShortcut, true);
-
-            // Sanitize the fps widget so the backend never receives an empty dict
-            const fpsWidget = this.widgets.find(w => w.name === 'fps');
-            if (fpsWidget && (typeof fpsWidget.value !== 'number' || isNaN(fpsWidget.value))) {
-                fpsWidget.value = 24;
-            }
         };
 
         // Receive frames from the backend after each execution
@@ -294,7 +374,13 @@ app.registerExtension({
             const countB = frameCountB > 0 ? frameCountB : loadedB.length;
             const total = Math.max(countA, countB);
 
-            const playbackFps = (fps && fps > 0) ? fps : 24;
+            // Prefer the live fps (row stepper / hidden widget) over the
+            // value baked into this execution message
+            let playbackFps = (fps && fps > 0) ? fps : 24;
+            const fpsW = this.widgets?.find(w => w.name === 'fps');
+            if (fpsW && typeof fpsW.value === 'number' && fpsW.value > 0) {
+                playbackFps = fpsW.value;
+            }
             if (this.timelineWidget) {
                 this.timelineWidget.nativeFPS = playbackFps;
                 this.timelineWidget.value.fps = playbackFps;
@@ -316,15 +402,30 @@ app.registerExtension({
             this.setDirtyCanvas(true, true);
         };
 
-        // Sanitize fps on workflow load
+        // Restore mode + fps on workflow load
         const originalOnConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function(info) {
             if (originalOnConfigure) {
                 originalOnConfigure.apply(this, arguments);
             }
+            this.compareMode = this.properties?.compare_mode || 'slide';
             const fpsWidget = this.widgets?.find(w => w.name === 'fps');
             if (fpsWidget && (typeof fpsWidget.value !== 'number' || isNaN(fpsWidget.value))) {
                 fpsWidget.value = 24;
+            }
+            if (fpsWidget && this.rowWidget) {
+                this.rowWidget.fpsValue = Math.max(1, Math.round(fpsWidget.value));
+            }
+            // output_pick widget values are applied just before this hook,
+            // so the widget wins; fall back to saved properties
+            const pickWidget = this.widgets?.find(w => w.name === 'output_pick');
+            if (pickWidget) {
+                if (pickWidget.value !== 'A' && pickWidget.value !== 'B') {
+                    pickWidget.value = this.properties?.output_pick || 'A';
+                }
+                this.outputPick = pickWidget.value;
+            } else {
+                this.outputPick = this.properties?.output_pick || 'A';
             }
         };
 
