@@ -2,13 +2,16 @@
  * Compare Row Widget for Power Compare Video
  *
  * Row above the playback area: three mode buttons on the left
- * (slide-compare / B-on-right / B-on-bottom, canvas-drawn icons), then two
- * pick buttons (A/B - which video the images output returns), and an fps
- * stepper on the right (same look as PowerLoadVideo's top row).
+ * (slide-compare / B-on-right / B-on-bottom, canvas-drawn icons), then three
+ * pick buttons (A / B / A&B - which video the images output returns; "A/B"
+ * returns both videos stitched into one), and an fps stepper on the right
+ * (same look as PowerLoadVideo's top row).
  * The active compare mode lives on the node (node.compareMode) and is
  * persisted via node.properties.compare_mode; the output pick lives on
  * node.outputPick and is persisted via node.properties.output_pick plus the
- * hidden output_pick combo widget.
+ * hidden output_pick combo widget. The A/B stitch orientation (hidden
+ * ab_stitch combo widget) follows the compare mode: "right" -> horizontal,
+ * anything else -> vertical (stacked).
  */
 import { app } from '../../../scripts/app.js';
 import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
@@ -28,6 +31,7 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
             modeBottom: { bounds: [0, 0, 0, 0] },
             pickA: { bounds: [0, 0, 0, 0] },
             pickB: { bounds: [0, 0, 0, 0] },
+            pickAB: { bounds: [0, 0, 0, 0] },
             fpsDec: { bounds: [0, 0, 0, 0] },
             fpsVal: { bounds: [0, 0, 0, 0] },
             fpsInc: { bounds: [0, 0, 0, 0] },
@@ -64,19 +68,21 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
             }
         });
 
-        // === Pick A/B buttons (after a small gap) ===
+        // === Pick A / B / A&B buttons (after a small gap) ===
         const groupGap = 14;
         const picks = [
-            ["pickA", "A"],
-            ["pickB", "B"],
+            ["pickA", "A", btnW],
+            ["pickB", "B", btnW],
+            ["pickAB", "A/B", btnW + 10],
         ];
-        const pickBaseX = margin + modes.length * (btnW + spacing) + groupGap - spacing;
-        picks.forEach(([key, pick], i) => {
-            const bx = pickBaseX + i * (btnW + spacing);
+        let pickX = margin + modes.length * (btnW + spacing) + groupGap - spacing;
+        picks.forEach(([key, pick, w]) => {
+            const bx = pickX;
+            pickX += w + spacing;
             const active = (node.outputPick || "A") === pick;
-            this.drawPickButton(ctx, bx, rowY, btnW, btnH, pick, active);
+            this.drawPickButton(ctx, bx, rowY, w, btnH, pick, active);
             const area = this.hitAreas[key];
-            area.bounds = [bx, rowY, btnW, btnH];
+            area.bounds = [bx, rowY, w, btnH];
             if (!area.onClick) {
                 area.onClick = (_e, _pos, n) => this.setPick(n, pick);
             }
@@ -212,13 +218,31 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
         // Keep the hidden backend widget in sync (serialization + next run)
         const w = node.widgets?.find((w) => w.name === "output_pick");
         if (w) w.value = pick;
+        // A/B stitching follows the current compare mode
+        if (pick === "A/B") {
+            this.applyAbStitchFromMode(node);
+        }
         node.setDirtyCanvas(true, true);
+    }
+
+    /** Keep the hidden ab_stitch widget in sync with the compare mode. */
+    applyAbStitchFromMode(node) {
+        const horizontal = (node.compareMode || "slide") === "right";
+        const value = horizontal ? "horizontal" : "vertical";
+        const w = node.widgets?.find((w) => w.name === "ab_stitch");
+        if (w) w.value = value;
+        node.properties = node.properties || {};
+        node.properties.ab_stitch = value;
     }
 
     setMode(node, mode) {
         node.compareMode = mode;
         node.properties = node.properties || {};
         node.properties.compare_mode = mode;
+        // A/B stitching follows the compare mode buttons
+        if ((node.outputPick || "A") === "A/B") {
+            this.applyAbStitchFromMode(node);
+        }
         if (typeof node.updateDisplayCanvas === "function") {
             node.updateDisplayCanvas(node.timelineWidget?.value?.currentFrame || 1);
         }

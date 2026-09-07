@@ -100,14 +100,28 @@ app.registerExtension({
             // Output pick (A/B): restored from properties/widget, edited via
             // the row's pick buttons - hide the default combo widget
             this.outputPick = this.properties?.output_pick || 'A';
+            if (this.outputPick !== 'A' && this.outputPick !== 'B' && this.outputPick !== 'A/B') {
+                this.outputPick = 'A';
+            }
             const pickWidget = this.widgets.find(w => w.name === 'output_pick');
             if (pickWidget) {
                 pickWidget.computeSize = () => [0, 0];
                 pickWidget.hidden = true;
-                if (pickWidget.value !== 'A' && pickWidget.value !== 'B') {
+                if (pickWidget.value !== 'A' && pickWidget.value !== 'B' && pickWidget.value !== 'A/B') {
                     pickWidget.value = 'A';
                 }
                 this.outputPick = pickWidget.value;
+            }
+
+            // A/B stitch orientation: follows the compare mode buttons via
+            // the row widget - hide the default combo widget
+            const stitchWidget = this.widgets.find(w => w.name === 'ab_stitch');
+            if (stitchWidget) {
+                stitchWidget.computeSize = () => [0, 0];
+                stitchWidget.hidden = true;
+                if (stitchWidget.value !== 'vertical' && stitchWidget.value !== 'horizontal') {
+                    stitchWidget.value = 'vertical';
+                }
             }
 
             // === PLAYBACK AREA (DOM widget) ===
@@ -420,12 +434,19 @@ app.registerExtension({
             // so the widget wins; fall back to saved properties
             const pickWidget = this.widgets?.find(w => w.name === 'output_pick');
             if (pickWidget) {
-                if (pickWidget.value !== 'A' && pickWidget.value !== 'B') {
+                if (pickWidget.value !== 'A' && pickWidget.value !== 'B' && pickWidget.value !== 'A/B') {
                     pickWidget.value = this.properties?.output_pick || 'A';
                 }
                 this.outputPick = pickWidget.value;
             } else {
                 this.outputPick = this.properties?.output_pick || 'A';
+            }
+            if (this.outputPick !== 'A' && this.outputPick !== 'B' && this.outputPick !== 'A/B') {
+                this.outputPick = 'A';
+            }
+            const stitchWidget = this.widgets?.find(w => w.name === 'ab_stitch');
+            if (stitchWidget && stitchWidget.value !== 'vertical' && stitchWidget.value !== 'horizontal') {
+                stitchWidget.value = this.properties?.ab_stitch || 'vertical';
             }
         };
 

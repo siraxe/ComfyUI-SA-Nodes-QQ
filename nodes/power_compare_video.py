@@ -50,9 +50,16 @@ class PowerCompareVideo:
                    previous run's input (e.g. upstream was fully cached), the
                    saved frames are left untouched - no promotion, no rewrite -
                    so B keeps pointing at the last genuinely DIFFERENT video.
-        output_pick - "A" (default) or "B": which video the images output returns.
-                      With images_b connected, B is returned losslessly; without it,
-                      B is decoded back from the cached previous-run frames.
+        output_pick - "A" (default), "B", or "A/B": which video the images
+                      output returns. With images_b connected, B is returned
+                      losslessly; without it, B is decoded back from the cached
+                      previous-run frames. "A/B" returns BOTH videos stitched
+                      into a single video according to ab_stitch.
+        ab_stitch   - Stitch orientation for output_pick = "A/B":
+                      "vertical" (default, A on top / B below) or
+                      "horizontal" (A left / B right). The frontend keeps this
+                      in sync with the compare mode buttons (right = horizontal,
+                      slide/bottom = vertical).
 
     Outputs:
         images - IMAGE tensor of the picked video (A or B per output_pick)
@@ -67,7 +74,8 @@ class PowerCompareVideo:
             "optional": {
                 "fps": ("FLOAT", {"default": 24, "min": 1, "max": 120, "step": 1}),
                 "images_b": ("IMAGE",),
-                "output_pick": (["A", "B"], {"default": "A"}),
+                "output_pick": (["A", "B", "A/B"], {"default": "A"}),
+                "ab_stitch": (["vertical", "horizontal"], {"default": "vertical"}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -77,9 +85,9 @@ class PowerCompareVideo:
     FUNCTION = "compare_video"
     OUTPUT_NODE = True
     CATEGORY = "Power/Video"
-    DESCRIPTION = "Playback preview + A/B comparison for video frames. Feed an IMAGE sequence (e.g. PowerLoadVideo's image output); compare against the previous run or an images_b input, then output the picked video."
+    DESCRIPTION = "Playback preview + A/B comparison for video frames. Feed an IMAGE sequence (e.g. PowerLoadVideo's image output); compare against the previous run or an images_b input, then output the picked video (A, B, or both stitched)."
 
-    def compare_video(self, images, fps=24.0, images_b=None, output_pick="A", unique_id=None):
+    def compare_video(self, images, fps=24.0, images_b=None, output_pick="A", ab_stitch="vertical", unique_id=None):
         # Type coercion (ComfyUI may pass an empty dict for untouched widgets)
         if isinstance(fps, dict):
             fps = 24.0
@@ -216,21 +224,63 @@ class PowerCompareVideo:
         #  - pick B: the connected images_b tensor if present (lossless),
         #    otherwise decode the cached/promoted b JPEGs back to a tensor;
         #    falls back to A when no B exists (first run, no input)
+        #  - pick A/B: BOTH videos stitched into one video. Orientation is
+        #    ab_stitch: "vertical" (A on top, B below - default) or
+        #    "horizontal" (A left, B right). B (decoded from cache if needed)
+        #    is rescaled to match A along the stitch axis, aspect preserved;
+        #    if frame counts differ the shorter video repeats its last frame
+        #    so both play to the end (same rule as the preview).
         pick = "A"
-        if isinstance(output_pick, str) and output_pick.upper() in ("A", "B"):
-            pick = output_pick.upper()
+        if isinstance(output_pick, str):
+            pick = output_pick.strip().upper()
+        if pick not in ("A", "B", "A/B"):
+            pick = "A"
+        horizontal = isinstance(ab_stitch, str) and ab_stitch.strip().lower() == "horizontal"
 
-        out_tensor = images
-        if pick == "B":
+        def _decode_b_tensor():
             if images_b is not None:
-                out_tensor = images_b
-            elif results_b:
+                return images_b
+            if results_b:
                 arrays = []
                 for ref in results_b:
                     p = os.path.join(temp_dir, ref["filename"])
                     with Image.open(p) as im:
                         arrays.append(np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0)
-                out_tensor = torch.from_numpy(np.stack(arrays, axis=0))
+                return torch.from_numpy(np.stack(arrays, axis=0))
+            return None
+
+        def _resize_frames(t, h, w):
+            if t.shape[1] == h and t.shape[2] == w:
+                return t
+            x = t.permute(0, 3, 1, 2).float()
+            x = torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
+            return x.permute(0, 2, 3, 1).clamp(0, 1)
+
+        def _stitch(a, b):
+            n = max(a.shape[0], b.shape[0])
+            if a.shape[0] < n:
+                a = torch.cat([a, a[-1:].repeat(n - a.shape[0], 1, 1, 1)], dim=0)
+            if b.shape[0] < n:
+                b = torch.cat([b, b[-1:].repeat(n - b.shape[0], 1, 1, 1)], dim=0)
+            ah, aw = int(a.shape[1]), int(a.shape[2])
+            bh, bw = int(b.shape[1]), int(b.shape[2])
+            if horizontal:
+                if bh != ah:
+                    b = _resize_frames(b, ah, max(1, round(bw * ah / bh)))
+                return torch.cat([a, b], dim=2)
+            if bw != aw:
+                b = _resize_frames(b, max(1, round(bh * aw / bw)), aw)
+            return torch.cat([a, b], dim=1)
+
+        out_tensor = images
+        if pick == "B":
+            b_tensor = _decode_b_tensor()
+            if b_tensor is not None:
+                out_tensor = b_tensor
+        elif pick == "A/B":
+            b_tensor = _decode_b_tensor()
+            if b_tensor is not None:
+                out_tensor = _stitch(images, b_tensor)
 
         # NOTE: every ui value must be a list - the server iterates over each
         # value when merging ui outputs (scalars crash with 'float' not iterable)
