@@ -60,9 +60,17 @@ class PowerCompareVideo:
                       "horizontal" (A left / B right). The frontend keeps this
                       in sync with the compare mode buttons (right = horizontal,
                       slide/bottom = vertical).
+        start_frame / end_frame - Timeline crop range set by the [ ] markers
+                      on the node's timeline (hidden widgets, synced by the
+                      timeline UI). 1-based inclusive; 0 (default) = auto
+                      (first / last frame). The images output is cropped to
+                      this range. With differing A/B frame counts each video
+                      crops to as much of the range as it has (the shorter
+                      one just ends earlier).
 
     Outputs:
-        images - IMAGE tensor of the picked video (A or B per output_pick)
+        images - IMAGE tensor of the picked video (A or B per output_pick),
+                 cropped to the timeline [ ] marker range when set
     """
 
     @classmethod
@@ -76,6 +84,8 @@ class PowerCompareVideo:
                 "images_b": ("IMAGE",),
                 "output_pick": (["A", "B", "A/B"], {"default": "A"}),
                 "ab_stitch": (["vertical", "horizontal"], {"default": "vertical"}),
+                "start_frame": ("INT", {"default": 0, "min": 0, "max": 10000000, "step": 1}),
+                "end_frame": ("INT", {"default": 0, "min": 0, "max": 10000000, "step": 1}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -85,9 +95,10 @@ class PowerCompareVideo:
     FUNCTION = "compare_video"
     OUTPUT_NODE = True
     CATEGORY = "Power/Video"
-    DESCRIPTION = "Playback preview + A/B comparison for video frames. Feed an IMAGE sequence (e.g. PowerLoadVideo's image output); compare against the previous run or an images_b input, then output the picked video (A, B, or both stitched)."
+    DESCRIPTION = "Playback preview + A/B comparison for video frames. Feed an IMAGE sequence (e.g. PowerLoadVideo's image output); compare against the previous run or an images_b input, then output the picked video (A, B, or both stitched) cropped to the timeline's [ ] marker range when set."
 
-    def compare_video(self, images, fps=24.0, images_b=None, output_pick="A", ab_stitch="vertical", unique_id=None):
+    def compare_video(self, images, fps=24.0, images_b=None, output_pick="A", ab_stitch="vertical",
+                      start_frame=0, end_frame=0, unique_id=None):
         # Type coercion (ComfyUI may pass an empty dict for untouched widgets)
         if isinstance(fps, dict):
             fps = 24.0
@@ -97,6 +108,14 @@ class PowerCompareVideo:
             fps = 24.0
         if fps <= 0:
             fps = 24.0
+
+        def _as_int(v, default=0):
+            if isinstance(v, dict):
+                return default
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
 
         def _to_numpy(t, name):
             tensor = t.cpu() if hasattr(t, "cpu") else t
@@ -272,15 +291,34 @@ class PowerCompareVideo:
                 b = _resize_frames(b, max(1, round(bh * aw / bw)), aw)
             return torch.cat([a, b], dim=1)
 
-        out_tensor = images
+        # --- Timeline crop ([ ] markers) -----------------------------------
+        # start_frame/end_frame come from the timeline's [ ] markers
+        # (1-based, inclusive; 0/invalid = auto -> first / last frame).
+        # Each video is cropped to as much of the range as it has, so with
+        # differing A/B frame counts the shorter one simply ends earlier.
+        s_marker = _as_int(start_frame)
+        e_marker = _as_int(end_frame)
+
+        def _crop_tensor(t):
+            if t is None or t.dim() != 4 or t.shape[0] == 0:
+                return t
+            n = int(t.shape[0])
+            s = 1 if s_marker <= 0 else max(1, min(s_marker, n))
+            e = n if e_marker <= 0 else max(s, min(e_marker, n))
+            if s == 1 and e == n:
+                return t
+            return t[s - 1:e]
+
+        out_tensor = _crop_tensor(images)
         if pick == "B":
-            b_tensor = _decode_b_tensor()
+            b_tensor = _crop_tensor(_decode_b_tensor())
             if b_tensor is not None:
                 out_tensor = b_tensor
         elif pick == "A/B":
-            b_tensor = _decode_b_tensor()
+            a_tensor = _crop_tensor(images)
+            b_tensor = _crop_tensor(_decode_b_tensor())
             if b_tensor is not None:
-                out_tensor = _stitch(images, b_tensor)
+                out_tensor = _stitch(a_tensor, b_tensor)
 
         # NOTE: every ui value must be a list - the server iterates over each
         # value when merging ui outputs (scalars crash with 'float' not iterable)

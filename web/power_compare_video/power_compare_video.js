@@ -124,6 +124,32 @@ app.registerExtension({
                 }
             }
 
+            // Timeline crop markers [ ]: the shared timeline widget syncs its
+            // marker positions to widgets named start_frame/end_frame, which
+            // the backend uses to crop the images output. Hidden here like
+            // the other widgets; value 0 = auto (first / last frame).
+            // Values MUST always be valid ints: ComfyUI's server-side prompt
+            // validation runs int() on them before the node executes, and
+            // workflows saved before these widgets existed can carry
+            // '' / null placeholders that would fail validation.
+            this.sanitizeCropWidgets = () => {
+                ['start_frame', 'end_frame'].forEach((nm) => {
+                    const w = this.widgets?.find((x) => x.name === nm);
+                    if (!w) return;
+                    let v = typeof w.value === 'number' ? w.value : parseInt(w.value, 10);
+                    if (!isFinite(v) || v < 0) v = 0;
+                    w.value = v;
+                });
+            };
+            ['start_frame', 'end_frame'].forEach((nm) => {
+                const w = this.widgets.find((x) => x.name === nm);
+                if (w) {
+                    w.computeSize = () => [0, 0];
+                    w.hidden = true;
+                }
+            });
+            this.sanitizeCropWidgets();
+
             // === PLAYBACK AREA (DOM widget) ===
             const container = document.createElement('div');
             container.id = 'power-compare-video-' + this.id;
@@ -331,8 +357,12 @@ app.registerExtension({
          * A = current video, B = second video (previous run or images_b input).
          * Playback covers the LONGER sequence; the shorter one freezes on its
          * last frame.
+         * `bust` is an optional cache-buster timestamp: execution-driven loads
+         * generate a fresh one (filenames may be overwritten with new content);
+         * restores from the persisted preview state reuse the stored one so the
+         * browser cache can still be hit.
          */
-        nodeType.prototype.loadCompareFrames = async function(frameInfos, fps, frameCount, frameInfosB, frameCountB) {
+        nodeType.prototype.loadCompareFrames = async function(frameInfos, fps, frameCount, frameInfosB, frameCountB, bust) {
             frameInfosB = Array.isArray(frameInfosB) ? frameInfosB : [];
 
             // Stop any ongoing playback before swapping frames
@@ -342,7 +372,8 @@ app.registerExtension({
             }
 
             // Cache-buster so re-executed frames with identical filenames refresh
-            const cacheBuster = '&t=' + Date.now();
+            const bustTime = bust || Date.now();
+            const cacheBuster = '&t=' + bustTime;
             const loadAll = (infos) => Promise.all(infos.map(info => new Promise((resolve) => {
                 const img = new Image();
                 img.onload = () => resolve(img);
@@ -399,8 +430,34 @@ app.registerExtension({
                 this.timelineWidget.nativeFPS = playbackFps;
                 this.timelineWidget.value.fps = playbackFps;
                 this.timelineWidget.setTotalFrames(this, total);
-                this.timelineWidget.setStartFrame(1, this);
-                this.timelineWidget.setEndFrame(total, this);
+
+                // Restore the [ ] crop markers when the user has set them
+                // (positions persist in the hidden start_frame/end_frame
+                // widgets, so they survive re-runs and workflow reloads);
+                // clamped to the new total. No markers set -> full range.
+                const cropWidget = (nm) => {
+                    const w = this.widgets?.find((x) => x.name === nm);
+                    return (w && typeof w.value === 'number' && w.value > 0) ? Math.round(w.value) : 0;
+                };
+                let mStart = cropWidget('start_frame');
+                let mEnd = cropWidget('end_frame');
+                if (mStart > 0 || mEnd > 0) {
+                    mStart = Math.max(1, Math.min(mStart || 1, total));
+                    mEnd = mEnd > 0 ? Math.max(mStart, Math.min(mEnd, total)) : total;
+                } else {
+                    mStart = 1;
+                    mEnd = total;
+                }
+                this.timelineWidget.setStartFrame(mStart, this);
+                this.timelineWidget.setEndFrame(mEnd, this);
+                // Full range -> keep the widgets at 0 (auto) so a video with a
+                // different frame count next run doesn't inherit a stale marker
+                if (mStart <= 1 && mEnd >= total) {
+                    const ws = this.widgets?.find((x) => x.name === 'start_frame');
+                    const we = this.widgets?.find((x) => x.name === 'end_frame');
+                    if (ws) ws.value = 0;
+                    if (we) we.value = 0;
+                }
             }
 
             // Default the slider to the middle once a second video exists
@@ -411,6 +468,21 @@ app.registerExtension({
             if (!loadedB.length) {
                 this.compareSplit = null;
             }
+
+            // Persist the preview (temp-file refs) on the node so switching
+            // workflow tabs / reloading the workflow restores the playback
+            // area without a re-run (the files live on in the server's temp
+            // dir; loadCompareFrames falls back to the placeholder if the
+            // server was restarted in between)
+            this.properties = this.properties || {};
+            this.properties.preview_state = {
+                frames: frameInfos,
+                frames_b: frameInfosB,
+                fps: playbackFps,
+                frame_count: countA,
+                frame_count_b: countB,
+                t: bustTime,
+            };
 
             this.updateDisplayCanvas(this.timelineWidget?.value?.currentFrame || 1);
             this.setDirtyCanvas(true, true);
@@ -447,6 +519,23 @@ app.registerExtension({
             const stitchWidget = this.widgets?.find(w => w.name === 'ab_stitch');
             if (stitchWidget && stitchWidget.value !== 'vertical' && stitchWidget.value !== 'horizontal') {
                 stitchWidget.value = this.properties?.ab_stitch || 'vertical';
+            }
+
+            // Widget values from the saved workflow were applied just before
+            // this hook - re-sanitize the crop widgets ('' / null placeholders
+            // from workflows saved before they existed would fail the
+            // server's int() validation when queuing)
+            if (typeof this.sanitizeCropWidgets === 'function') {
+                this.sanitizeCropWidgets();
+            }
+
+            // Restore the persisted preview (frames are still in the server's
+            // temp dir) so the playback area survives workflow reloads and
+            // tab switches without needing a re-run. Marker positions come
+            // back via the restored start_frame/end_frame widget values.
+            const st = this.properties?.preview_state;
+            if (st && Array.isArray(st.frames) && st.frames.length) {
+                this.loadCompareFrames(st.frames, st.fps, st.frame_count, st.frames_b, st.frame_count_b, st.t);
             }
         };
 
