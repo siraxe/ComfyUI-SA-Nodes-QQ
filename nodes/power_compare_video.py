@@ -50,11 +50,12 @@ class PowerCompareVideo:
                    previous run's input (e.g. upstream was fully cached), the
                    saved frames are left untouched - no promotion, no rewrite -
                    so B keeps pointing at the last genuinely DIFFERENT video.
-        output_pick - "A" (default), "B", or "A/B": which video the images
-                      output returns. With images_b connected, B is returned
-                      losslessly; without it, B is decoded back from the cached
-                      previous-run frames. "A/B" returns BOTH videos stitched
-                      into a single video according to ab_stitch.
+        output_pick - "A" (default), "B", "A/B", or "B/A": which video the
+                      images output returns. With images_b connected, B is
+                      returned losslessly; without it, B is decoded back from
+                      the cached previous-run frames. "A/B" / "B/A" return BOTH
+                      videos stitched into a single video according to
+                      ab_stitch ("A/B": A first - top/left; "B/A": B first).
         ab_stitch   - Stitch orientation for output_pick = "A/B":
                       "vertical" (default, A on top / B below) or
                       "horizontal" (A left / B right). The frontend keeps this
@@ -82,7 +83,7 @@ class PowerCompareVideo:
             "optional": {
                 "fps": ("FLOAT", {"default": 24, "min": 1, "max": 120, "step": 1}),
                 "images_b": ("IMAGE",),
-                "output_pick": (["A", "B", "A/B"], {"default": "A"}),
+                "output_pick": (["A", "B", "A/B", "B/A"], {"default": "A"}),
                 "ab_stitch": (["vertical", "horizontal"], {"default": "vertical"}),
                 "start_frame": ("INT", {"default": 0, "min": 0, "max": 10000000, "step": 1}),
                 "end_frame": ("INT", {"default": 0, "min": 0, "max": 10000000, "step": 1}),
@@ -249,10 +250,12 @@ class PowerCompareVideo:
         #    is rescaled to match A along the stitch axis, aspect preserved;
         #    if frame counts differ the shorter video repeats its last frame
         #    so both play to the end (same rule as the preview).
+        #  - pick B/A: same stitched output with the videos swapped
+        #    (B first: top in vertical, left in horizontal).
         pick = "A"
         if isinstance(output_pick, str):
             pick = output_pick.strip().upper()
-        if pick not in ("A", "B", "A/B"):
+        if pick not in ("A", "B", "A/B", "B/A"):
             pick = "A"
         horizontal = isinstance(ab_stitch, str) and ab_stitch.strip().lower() == "horizontal"
 
@@ -314,11 +317,11 @@ class PowerCompareVideo:
             b_tensor = _crop_tensor(_decode_b_tensor())
             if b_tensor is not None:
                 out_tensor = b_tensor
-        elif pick == "A/B":
+        elif pick in ("A/B", "B/A"):
             a_tensor = _crop_tensor(images)
             b_tensor = _crop_tensor(_decode_b_tensor())
             if b_tensor is not None:
-                out_tensor = _stitch(a_tensor, b_tensor)
+                out_tensor = _stitch(a_tensor, b_tensor) if pick == "A/B" else _stitch(b_tensor, a_tensor)
 
         # NOTE: every ui value must be a list - the server iterates over each
         # value when merging ui outputs (scalars crash with 'float' not iterable)

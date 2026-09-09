@@ -2,10 +2,11 @@
  * Compare Row Widget for Power Compare Video
  *
  * Row above the playback area: three mode buttons on the left
- * (slide-compare / B-on-right / B-on-bottom, canvas-drawn icons), then three
- * pick buttons (A / B / A&B - which video the images output returns; "A/B"
- * returns both videos stitched into one), and an fps stepper on the right
- * (same look as PowerLoadVideo's top row).
+ * (slide-compare / B-on-right / B-on-bottom, canvas-drawn icons), then four
+ * pick buttons (A / B / A/B / B/A - which video the images output returns;
+ * "A/B"/"B/A" return both videos stitched into one, with the videos swapped
+ * for "B/A"), and an fps stepper on the right (same look as PowerLoadVideo's
+ * top row).
  * The active compare mode lives on the node (node.compareMode) and is
  * persisted via node.properties.compare_mode; the output pick lives on
  * node.outputPick and is persisted via node.properties.output_pick plus the
@@ -32,6 +33,7 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
             pickA: { bounds: [0, 0, 0, 0] },
             pickB: { bounds: [0, 0, 0, 0] },
             pickAB: { bounds: [0, 0, 0, 0] },
+            pickBA: { bounds: [0, 0, 0, 0] },
             fpsDec: { bounds: [0, 0, 0, 0] },
             fpsVal: { bounds: [0, 0, 0, 0] },
             fpsInc: { bounds: [0, 0, 0, 0] },
@@ -68,12 +70,13 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
             }
         });
 
-        // === Pick A / B / A&B buttons (after a small gap) ===
+        // === Pick A / B / A&B / B&A buttons (after a small gap) ===
         const groupGap = 14;
         const picks = [
             ["pickA", "A", btnW],
             ["pickB", "B", btnW],
             ["pickAB", "A/B", btnW + 10],
+            ["pickBA", "B/A", btnW + 10],
         ];
         let pickX = margin + modes.length * (btnW + spacing) + groupGap - spacing;
         picks.forEach(([key, pick, w]) => {
@@ -218,8 +221,8 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
         // Keep the hidden backend widget in sync (serialization + next run)
         const w = node.widgets?.find((w) => w.name === "output_pick");
         if (w) w.value = pick;
-        // A/B stitching follows the current compare mode
-        if (pick === "A/B") {
+        // A/B + B/A stitching follows the current compare mode
+        if (pick === "A/B" || pick === "B/A") {
             this.applyAbStitchFromMode(node);
         }
         node.setDirtyCanvas(true, true);

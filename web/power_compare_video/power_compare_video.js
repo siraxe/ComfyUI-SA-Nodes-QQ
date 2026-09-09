@@ -97,17 +97,18 @@ app.registerExtension({
                 this.rowWidget.fpsValue = Math.max(1, Math.round(fpsWidget.value));
             }
 
-            // Output pick (A/B): restored from properties/widget, edited via
-            // the row's pick buttons - hide the default combo widget
+            // Output pick (A/B/B/A): restored from properties/widget, edited
+            // via the row's pick buttons - hide the default combo widget
+            const validPicks = ['A', 'B', 'A/B', 'B/A'];
             this.outputPick = this.properties?.output_pick || 'A';
-            if (this.outputPick !== 'A' && this.outputPick !== 'B' && this.outputPick !== 'A/B') {
+            if (!validPicks.includes(this.outputPick)) {
                 this.outputPick = 'A';
             }
             const pickWidget = this.widgets.find(w => w.name === 'output_pick');
             if (pickWidget) {
                 pickWidget.computeSize = () => [0, 0];
                 pickWidget.hidden = true;
-                if (pickWidget.value !== 'A' && pickWidget.value !== 'B' && pickWidget.value !== 'A/B') {
+                if (!validPicks.includes(pickWidget.value)) {
                     pickWidget.value = 'A';
                 }
                 this.outputPick = pickWidget.value;
@@ -504,16 +505,17 @@ app.registerExtension({
             }
             // output_pick widget values are applied just before this hook,
             // so the widget wins; fall back to saved properties
+            const validPicks = ['A', 'B', 'A/B', 'B/A'];
             const pickWidget = this.widgets?.find(w => w.name === 'output_pick');
             if (pickWidget) {
-                if (pickWidget.value !== 'A' && pickWidget.value !== 'B' && pickWidget.value !== 'A/B') {
+                if (!validPicks.includes(pickWidget.value)) {
                     pickWidget.value = this.properties?.output_pick || 'A';
                 }
                 this.outputPick = pickWidget.value;
             } else {
                 this.outputPick = this.properties?.output_pick || 'A';
             }
-            if (this.outputPick !== 'A' && this.outputPick !== 'B' && this.outputPick !== 'A/B') {
+            if (!validPicks.includes(this.outputPick)) {
                 this.outputPick = 'A';
             }
             const stitchWidget = this.widgets?.find(w => w.name === 'ab_stitch');
