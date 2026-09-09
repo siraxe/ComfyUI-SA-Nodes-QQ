@@ -11,7 +11,7 @@ import hashlib
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import folder_paths
 
 
@@ -28,6 +28,62 @@ def _frames_fingerprint(arrs):
     for i in range(arrs.shape[0]):
         h.update(np.ascontiguousarray(arrs[i]).tobytes())
     return h.hexdigest()
+
+
+# --- Corner overlay labels (A/B stitched output) ---------------------------
+# Text metrics scale with each video's resolution: size 16 and a (10, 8)
+# corner offset are the reference for a 512x512 (~0.26 MP) video; larger
+# videos scale both proportionally (sqrt of the pixel-count ratio) so the
+# labels stay readable at any resolution.
+_LABEL_BASE_SIZE = 16
+_LABEL_REF_PIXELS = 512 * 512  # ~0.26 MP reference
+_LABEL_BASE_OFFSET = (10, 8)   # x, y offset from the corner, at reference size
+_FONT_CACHE = {}
+
+
+def _label_font(size):
+    """Arial at the requested size when available, else a sane fallback."""
+    size = max(6, int(round(size)))
+    if size not in _FONT_CACHE:
+        font = None
+        for candidate in (
+            "arial.ttf",
+            "Arial.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "DejaVuSans.ttf",
+        ):
+            try:
+                font = ImageFont.truetype(candidate, size)
+                break
+            except Exception:
+                continue
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        _FONT_CACHE[size] = font
+    return _FONT_CACHE[size]
+
+
+def _label_scale(h, w):
+    """Proportional scale factor for a region of h x w pixels."""
+    return ((h * w) / _LABEL_REF_PIXELS) ** 0.5
+
+
+def _draw_label_text(draw, text, x, y, size):
+    """White text with a small black outline (top-left corner offsets)."""
+    kwargs = {}
+    font = _label_font(size)
+    if font is not None:
+        kwargs["font"] = font
+    stroke = max(1, int(round(size / 10)))  # keep the outline thin
+    try:
+        draw.text((x, y), text, fill=(255, 255, 255),
+                  stroke_width=stroke, stroke_fill=(0, 0, 0), **kwargs)
+    except TypeError:  # older Pillow without stroke support
+        draw.text((x, y), text, fill=(255, 255, 255), **kwargs)
 
 
 class PowerCompareVideo:
@@ -61,6 +117,13 @@ class PowerCompareVideo:
                       "horizontal" (A left / B right). The frontend keeps this
                       in sync with the compare mode buttons (right = horizontal,
                       slide/bottom = vertical).
+        label_a / label_b - Optional overlay captions edited via the row's
+                      "A:"/"B:" text fields (default empty = no overlay).
+                      When set AND output_pick is "A/B"/"B/A", each text is
+                      burned into the top-left corner of its video's region
+                      in the stitched output: white fill, small black
+                      outline, Arial (16px at a 512x512 ~ 0.26 MP video,
+                      scaled proportionally with each video's resolution).
         start_frame / end_frame - Timeline crop range set by the [ ] markers
                       on the node's timeline (hidden widgets, synced by the
                       timeline UI). 1-based inclusive; 0 (default) = auto
@@ -85,6 +148,8 @@ class PowerCompareVideo:
                 "images_b": ("IMAGE",),
                 "output_pick": (["A", "B", "A/B", "B/A"], {"default": "A"}),
                 "ab_stitch": (["vertical", "horizontal"], {"default": "vertical"}),
+                "label_a": ("STRING", {"default": ""}),
+                "label_b": ("STRING", {"default": ""}),
                 "start_frame": ("INT", {"default": 0, "min": 0, "max": 10000000, "step": 1}),
                 "end_frame": ("INT", {"default": 0, "min": 0, "max": 10000000, "step": 1}),
             },
@@ -99,7 +164,7 @@ class PowerCompareVideo:
     DESCRIPTION = "Playback preview + A/B comparison for video frames. Feed an IMAGE sequence (e.g. PowerLoadVideo's image output); compare against the previous run or an images_b input, then output the picked video (A, B, or both stitched) cropped to the timeline's [ ] marker range when set."
 
     def compare_video(self, images, fps=24.0, images_b=None, output_pick="A", ab_stitch="vertical",
-                      start_frame=0, end_frame=0, unique_id=None):
+                      label_a="", label_b="", start_frame=0, end_frame=0, unique_id=None):
         # Type coercion (ComfyUI may pass an empty dict for untouched widgets)
         if isinstance(fps, dict):
             fps = 24.0
@@ -278,7 +343,13 @@ class PowerCompareVideo:
             x = torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
             return x.permute(0, 2, 3, 1).clamp(0, 1)
 
+        # Pixel size of the FIRST video's region in the stitched output
+        # (width for horizontal, height for vertical) - used to place the
+        # second label at the top-left of the second video's region.
+        stitch_split = 0
+
         def _stitch(a, b):
+            nonlocal stitch_split
             n = max(a.shape[0], b.shape[0])
             if a.shape[0] < n:
                 a = torch.cat([a, a[-1:].repeat(n - a.shape[0], 1, 1, 1)], dim=0)
@@ -289,10 +360,60 @@ class PowerCompareVideo:
             if horizontal:
                 if bh != ah:
                     b = _resize_frames(b, ah, max(1, round(bw * ah / bh)))
+                stitch_split = aw
                 return torch.cat([a, b], dim=2)
             if bw != aw:
                 b = _resize_frames(b, max(1, round(bh * aw / bw)), aw)
+            stitch_split = ah
             return torch.cat([a, b], dim=1)
+
+        def _clean_label(v):
+            return v.strip() if isinstance(v, str) and v.strip() else None
+
+        def _burn_stitch_labels(t, first_text, second_text, split):
+            """Burn corner labels into the stitched frames.
+
+            first_text goes at the top-left of the whole output (first
+            video's region), second_text at the top-left of the second
+            video's region (below the split for vertical, right of it for
+            horizontal). White fill, small black outline, Arial. Size and
+            corner offset scale with each video's own resolution (16px /
+            (10,8)px at 512x512 ~ 0.26 MP, proportional beyond that).
+            """
+            if t is None or t.dim() != 4 or t.shape[0] == 0:
+                return t
+            h, w = int(t.shape[1]), int(t.shape[2])
+            # Each label scales with ITS OWN video's region size
+            if horizontal:
+                regions = [(h, split), (h, w - split)]
+            else:
+                regions = [(split, w), (h - split, w)]
+            labels = []
+            for (rh, rw), text in zip(regions, (first_text, second_text)):
+                if not text:
+                    labels.append(None)
+                    continue
+                s = _label_scale(rh, rw)
+                labels.append({
+                    "text": text,
+                    "size": _LABEL_BASE_SIZE * s,
+                    "off_x": round(_LABEL_BASE_OFFSET[0] * s),
+                    "off_y": round(_LABEL_BASE_OFFSET[1] * s),
+                    "region_w": rw,
+                })
+            arrs = (t.float().clamp(0, 1).cpu().numpy() * 255.0).astype(np.uint8)
+            out = []
+            for i in range(arrs.shape[0]):
+                img = Image.fromarray(arrs[i])
+                draw = ImageDraw.Draw(img)
+                for j, lab in enumerate(labels):
+                    if lab is None:
+                        continue
+                    x = lab["off_x"] + (lab["region_w"] if (j == 1 and horizontal) else 0)
+                    y = lab["off_y"] + (split if (j == 1 and not horizontal) else 0)
+                    _draw_label_text(draw, lab["text"], x, y, lab["size"])
+                out.append(torch.from_numpy(np.asarray(img, dtype=np.float32) / 255.0))
+            return torch.stack(out, dim=0)
 
         # --- Timeline crop ([ ] markers) -----------------------------------
         # start_frame/end_frame come from the timeline's [ ] markers
@@ -321,7 +442,16 @@ class PowerCompareVideo:
             a_tensor = _crop_tensor(images)
             b_tensor = _crop_tensor(_decode_b_tensor())
             if b_tensor is not None:
-                out_tensor = _stitch(a_tensor, b_tensor) if pick == "A/B" else _stitch(b_tensor, a_tensor)
+                stitched = _stitch(a_tensor, b_tensor) if pick == "A/B" else _stitch(b_tensor, a_tensor)
+                # Corner overlay labels (only for the stitched A/B output,
+                # only for labels the user actually typed)
+                label_a_txt = _clean_label(label_a)
+                label_b_txt = _clean_label(label_b)
+                if label_a_txt or label_b_txt:
+                    first_text = label_b_txt if pick == "B/A" else label_a_txt
+                    second_text = label_a_txt if pick == "B/A" else label_b_txt
+                    stitched = _burn_stitch_labels(stitched, first_text, second_text, stitch_split)
+                out_tensor = stitched
 
         # NOTE: every ui value must be a list - the server iterates over each
         # value when merging ui outputs (scalars crash with 'float' not iterable)

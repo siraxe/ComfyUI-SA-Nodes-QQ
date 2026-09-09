@@ -13,6 +13,10 @@
  * hidden output_pick combo widget. The A/B stitch orientation (hidden
  * ab_stitch combo widget) follows the compare mode: "right" -> horizontal,
  * anything else -> vertical (stacked).
+ * After the pick buttons come two overlay label text fields ("A:" / "B:",
+ * click to edit, stored on the hidden label_a / label_b string widgets):
+ * when set and output_pick is "A/B"/"B/A", the backend burns each text into
+ * the top-left corner of its video's region in the stitched output.
  */
 import { app } from '../../../scripts/app.js';
 import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
@@ -34,6 +38,8 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
             pickB: { bounds: [0, 0, 0, 0] },
             pickAB: { bounds: [0, 0, 0, 0] },
             pickBA: { bounds: [0, 0, 0, 0] },
+            labelA: { bounds: [0, 0, 0, 0] },
+            labelB: { bounds: [0, 0, 0, 0] },
             fpsDec: { bounds: [0, 0, 0, 0] },
             fpsVal: { bounds: [0, 0, 0, 0] },
             fpsInc: { bounds: [0, 0, 0, 0] },
@@ -91,6 +97,32 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
             }
         });
 
+        // === Overlay label text fields ("A:" / "B:") after the pick buttons ===
+        // Click opens a text prompt; the value is stored on the hidden
+        // label_a / label_b widgets. Empty (default) = no overlay. The
+        // backend burns the texts into the top-left corners of the stitched
+        // A/B output when output_pick is "A/B" / "B/A".
+        const labelW = 70;
+        const labelTextW = 14;
+        const labelFields = [
+            ["labelA", "A:", "label_a"],
+            ["labelB", "B:", "label_b"],
+        ];
+        let labelX = pickX + 4;
+        ctx.font = "12px Sans-Serif";
+        ctx.textAlign = "left";
+        labelFields.forEach(([key, caption, widgetName]) => {
+            ctx.fillStyle = LiteGraph.WIDGET_TEXT_COLOR;
+            ctx.fillText(caption, labelX, midY);
+            const fx = labelX + labelTextW;
+            this.drawLabelField(ctx, fx, rowY, labelW, btnH, node, widgetName);
+            this.hitAreas[key].bounds = [fx, rowY, labelW, btnH];
+            if (!this.hitAreas[key].onClick) {
+                this.hitAreas[key].onClick = (_e, _pos, n) => this.promptLabel(n, widgetName, caption);
+            }
+            labelX = fx + labelW + 12;
+        });
+
         // === FPS stepper (right side) ===
         const arrowW = 12;
         const textW = 26;
@@ -122,9 +154,9 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
     drawModeButton(ctx, x, y, w, h, mode, active) {
         ctx.save();
 
-        // Rounded button background (active = cyan, PowerLoadVideo style)
-        ctx.fillStyle = active ? "#0d3b4a" : LiteGraph.WIDGET_BGCOLOR;
-        ctx.strokeStyle = active ? "#2cc6ff" : LiteGraph.WIDGET_OUTLINE_COLOR;
+        // Rounded button background (active = orange-yellow for the view mode buttons)
+        ctx.fillStyle = active ? "#4a3208" : LiteGraph.WIDGET_BGCOLOR;
+        ctx.strokeStyle = active ? "#ffb02e" : LiteGraph.WIDGET_OUTLINE_COLOR;
         ctx.lineWidth = active ? 2 : 1;
         ctx.beginPath();
         if (ctx.roundRect) {
@@ -142,7 +174,7 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
         const by = y + padY;
         const bw = w - padX * 2;
         const bh = h - padY * 2;
-        const ic = active ? "#2cc6ff" : "#9a9a9a";
+        const ic = active ? "#ffb02e" : "#9a9a9a";
         ctx.strokeStyle = ic;
         ctx.fillStyle = ic;
         ctx.lineWidth = 1.5;
@@ -186,6 +218,57 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
         }
 
         ctx.restore();
+    }
+
+    /** Text field showing the current label_a / label_b widget value. */
+    drawLabelField(ctx, x, y, w, h, node, widgetName) {
+        ctx.save();
+
+        // Rounded field background (same look as the other row buttons)
+        ctx.fillStyle = LiteGraph.WIDGET_BGCOLOR;
+        ctx.strokeStyle = LiteGraph.WIDGET_OUTLINE_COLOR;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(x, y, w, h, [6]);
+        } else {
+            ctx.rect(x, y, w, h);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        const wgt = node.widgets?.find((w2) => w2.name === widgetName);
+        const val = (wgt && typeof wgt.value === "string" && wgt.value) ? wgt.value : "";
+
+        // Clip to the field so long values don't spill into the fps stepper
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x + 2, y + 1, w - 4, h - 2);
+        ctx.clip();
+        ctx.font = "12px Sans-Serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = val ? LiteGraph.WIDGET_TEXT_COLOR : "#777777";
+        ctx.fillText(val || "none", x + 6, y + h / 2 + 0.5);
+        ctx.restore();
+
+        ctx.restore();
+    }
+
+    setLabel(node, widgetName, value) {
+        const w = node.widgets?.find((w2) => w2.name === widgetName);
+        if (w) w.value = value;
+        node.properties = node.properties || {};
+        node.properties[widgetName] = value;
+        node.setDirtyCanvas(true, true);
+    }
+
+    promptLabel(node, widgetName, caption) {
+        const w = node.widgets?.find((w2) => w2.name === widgetName);
+        const cur = (w && typeof w.value === "string") ? w.value : "";
+        app.canvas.prompt(caption + " overlay text (empty = none)", cur, (v) => {
+            this.setLabel(node, widgetName, v == null ? "" : String(v));
+        });
     }
 
     drawPickButton(ctx, x, y, w, h, letter, active) {
@@ -242,8 +325,9 @@ export class PowerCompareRowWidget extends RgthreeBaseWidget {
         node.compareMode = mode;
         node.properties = node.properties || {};
         node.properties.compare_mode = mode;
-        // A/B stitching follows the compare mode buttons
-        if ((node.outputPick || "A") === "A/B") {
+        // A/B + B/A stitching follows the compare mode buttons
+        const pick = node.outputPick || "A";
+        if (pick === "A/B" || pick === "B/A") {
             this.applyAbStitchFromMode(node);
         }
         if (typeof node.updateDisplayCanvas === "function") {

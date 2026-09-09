@@ -125,6 +125,20 @@ app.registerExtension({
                 }
             }
 
+            // Overlay corner labels for the stitched A/B output ("A:"/"B:"
+            // text fields in the row widget): default hidden widgets kept in
+            // sync; empty string (default) = no overlay
+            ['label_a', 'label_b'].forEach((nm) => {
+                const w = this.widgets.find((x) => x.name === nm);
+                if (w) {
+                    w.computeSize = () => [0, 0];
+                    w.hidden = true;
+                    if (typeof w.value !== 'string') {
+                        w.value = this.properties?.[nm] || '';
+                    }
+                }
+            });
+
             // Timeline crop markers [ ]: the shared timeline widget syncs its
             // marker positions to widgets named start_frame/end_frame, which
             // the backend uses to crop the images output. Hidden here like
@@ -208,30 +222,6 @@ app.registerExtension({
                 ctx.drawImage(img, rx + (rw - dw) / 2, ry + (rh - dh) / 2, dw, dh);
             };
 
-            // White divider lines (same look as rgthree's comparer)
-            const drawDividerV = (ctx, x, h) => {
-                ctx.save();
-                ctx.globalCompositeOperation = 'difference';
-                ctx.strokeStyle = 'rgba(255,255,255,1)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(x, 0);
-                ctx.lineTo(x, h);
-                ctx.stroke();
-                ctx.restore();
-            };
-            const drawDividerH = (ctx, y, w) => {
-                ctx.save();
-                ctx.globalCompositeOperation = 'difference';
-                ctx.strokeStyle = 'rgba(255,255,255,1)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(0, y);
-                ctx.lineTo(w, y);
-                ctx.stroke();
-                ctx.restore();
-            };
-
             /**
              * Draw the frame at frameIndex (1-based) onto the display canvas.
              * Signature matches what PowerLoadVideoTimelineWidget expects.
@@ -280,23 +270,22 @@ app.registerExtension({
                     if (typeof this.compareSplit === 'number') {
                         const splitX = Math.round(Math.max(0, Math.min(1, this.compareSplit)) * cw);
                         if (splitX > 0) {
-                            // B clipped to the left of the divider (stretched to
-                            // the canvas size so differing resolutions still align)
+                            // B clipped to the left of the split (stretched to
+                            // the canvas size so differing resolutions still align).
+                            // No divider line is drawn - the split is invisible;
+                            // only the mouse cursor hints at the slider.
                             ctx.save();
                             ctx.beginPath();
                             ctx.rect(0, 0, splitX, ch);
                             ctx.clip();
                             ctx.drawImage(imgB, 0, 0, cw, ch);
                             ctx.restore();
-                            drawDividerV(ctx, splitX, ch);
                         }
                     }
                 } else if (mode === 'right') {
                     drawFit(ctx, imgB, aw, 0, aw, ah);
-                    drawDividerV(ctx, aw, ch);
                 } else { // bottom
                     drawFit(ctx, imgB, 0, ah, aw, ah);
-                    drawDividerH(ctx, ah, cw);
                 }
             };
 
@@ -522,6 +511,16 @@ app.registerExtension({
             if (stitchWidget && stitchWidget.value !== 'vertical' && stitchWidget.value !== 'horizontal') {
                 stitchWidget.value = this.properties?.ab_stitch || 'vertical';
             }
+
+            // Overlay labels: widget values from the saved workflow were
+            // applied just before this hook - fall back to saved properties
+            // for workflows saved before the fields existed (or bad values)
+            ['label_a', 'label_b'].forEach((nm) => {
+                const w = this.widgets?.find((x) => x.name === nm);
+                if (w && typeof w.value !== 'string') {
+                    w.value = this.properties?.[nm] || '';
+                }
+            });
 
             // Widget values from the saved workflow were applied just before
             // this hook - re-sanitize the crop widgets ('' / null placeholders
