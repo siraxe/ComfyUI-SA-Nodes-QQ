@@ -257,6 +257,284 @@ class ImageBlend_GPU:
         return (output_bhwc.cpu(),)
 
 
+class ImageBlend_GPU_advanced(ImageBlend_GPU):
+    """
+    Advanced image blend node.
+
+    Extra features over ImageBlend_GPU:
+    - Batch/video aware: output has max(background frames, layer frames) frames,
+      the shorter input gets its last frame repeated (works with image + video combos).
+    - blend_corner: optionally snap the layer_image to a corner of the background
+      instead of resizing it to cover the whole background.
+      concat_left / concat_right: resize the layer to the background height
+      (aspect preserved) and place it before/after the background side by side
+      instead of blending it on top.
+      concat_up / concat_down: same, but the layer is resized to the background
+      width and stacked on top / below the background.
+    - resize_to_32: center-crop the final output so width/height are divisible by 32.
+    - low_MP: if > 0, proportionally scale the output to the given megapixels
+      and also output it (plus its mask) through the image_low / mask_low outputs.
+    - mask output: shows where the layer_image was placed on the background.
+    """
+    NODE_NAME = "Image Blend GPU Advanced"
+
+    BLEND_CORNERS = [
+        "none",
+        "top_left", "top_right",
+        "bottom_left", "bottom_right",
+        "concat_left", "concat_right",
+        "concat_up", "concat_down",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "background_image": ("IMAGE",), # BHWC tensor
+                "layer_image": ("IMAGE",),      # BHWC tensor
+                "blend_mode": (cls.BLEND_MODES,),
+                "blend_corner": (cls.BLEND_CORNERS, {"default": "none"}),
+                "opacity": ("INT", {"default": 100, "min": 0, "max": 100, "step": 1}),
+                "resize_to_32": ("BOOLEAN", {"default": False}),
+                "low_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
+            },
+            "optional": {
+                "layer_mask": ("MASK",),       # BHW tensor
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "MASK")
+    RETURN_NAMES = ("image", "mask", "image_low", "mask_low")
+    FUNCTION = 'image_blend_gpu_advanced'
+    CATEGORY = 'WanVideoWrapper_QQ/image'
+
+    @staticmethod
+    def _pad_batch_to(tensor_bhwc, target_frames):
+        """Repeat last frame until batch matches target_frames."""
+        n = tensor_bhwc.shape[0]
+        if n < target_frames:
+            tensor_bhwc = torch.cat(
+                [tensor_bhwc, tensor_bhwc[-1:].repeat(target_frames - n, 1, 1, 1)], dim=0
+            )
+        elif n > target_frames:
+            tensor_bhwc = tensor_bhwc[:target_frames]
+        return tensor_bhwc
+
+    @staticmethod
+    def _resize_bhwc(tensor_bhwc, target_h, target_w):
+        """Bilinear resize of a BHWC tensor (works for images and single-channel masks)."""
+        bchw = tensor_bhwc.permute(0, 3, 1, 2)
+        resized = F.interpolate(bchw, size=(target_h, target_w), mode='bilinear', align_corners=False)
+        return resized.permute(0, 2, 3, 1)
+
+    @staticmethod
+    def _center_crop_to_multiple(tensor_bhwc, divisor=32):
+        """Center-crop a BHWC tensor so H and W are divisible by divisor."""
+        h, w = tensor_bhwc.shape[1], tensor_bhwc.shape[2]
+        target_h = (h // divisor) * divisor
+        target_w = (w // divisor) * divisor
+        if (target_h, target_w) == (h, w):
+            return tensor_bhwc, False
+        y0 = (h - target_h) // 2
+        x0 = (w - target_w) // 2
+        return tensor_bhwc[:, y0:y0 + target_h, x0:x0 + target_w, :], True
+
+    def image_blend_gpu_advanced(self, background_image, layer_image,
+                                 blend_mode, blend_corner, opacity,
+                                 layer_mask=None, resize_to_32=False, low_MP=0.0):
+
+        device = background_image.device
+
+        bg_bhwc = background_image.to(device, dtype=torch.float32)
+        layer_bhwc = layer_image.to(device, dtype=torch.float32)
+
+        b_frames, bg_h, bg_w = bg_bhwc.shape[0], bg_bhwc.shape[1], bg_bhwc.shape[2]
+        l_frames, l_h, l_w = layer_bhwc.shape[0], layer_bhwc.shape[1], layer_bhwc.shape[2]
+        max_frames = max(b_frames, l_frames)
+
+        # --- Pad batch (repeat last frame) so both match max_frames ---
+        if b_frames != max_frames:
+            print(f"[INFO] Background has {b_frames} frames, layer has {l_frames}. "
+                  f"Repeating last background frame to {max_frames}.")
+            bg_bhwc = self._pad_batch_to(bg_bhwc, max_frames)
+        if l_frames != max_frames:
+            print(f"[INFO] Layer has {l_frames} frames, background has {b_frames}. "
+                  f"Repeating last layer frame to {max_frames}.")
+            layer_bhwc = self._pad_batch_to(layer_bhwc, max_frames)
+
+        # --- Ensure RGB channel counts ---
+        if bg_bhwc.shape[3] == 4:
+            print("[WARNING] Background has alpha, removing it.")
+            bg_bhwc = bg_bhwc[..., :3]
+        elif bg_bhwc.shape[3] == 1:
+            bg_bhwc = bg_bhwc.repeat(1, 1, 1, 3)
+
+        if layer_bhwc.shape[3] == 4:
+            layer_bhwc = layer_bhwc[..., :3]
+        elif layer_bhwc.shape[3] == 1:
+            layer_bhwc = layer_bhwc.repeat(1, 1, 1, 3)
+        elif layer_bhwc.shape[3] != 3:
+            raise ValueError(f"Layer image must have 1 (grayscale), 3 (RGB), or 4 (RGBA) channels. Got shape: {layer_bhwc.shape}")
+
+        # --- Layer mask handling ---
+        if layer_mask is not None:
+            mask_bhwc = layer_mask.to(device, dtype=torch.float32)
+            if mask_bhwc.dim() == 2:  # Single mask HW for whole batch
+                mask_bhwc = mask_bhwc.unsqueeze(0).unsqueeze(-1)  # -> B1HW -> BHWC(1ch)
+            elif mask_bhwc.dim() == 3:  # BHW
+                mask_bhwc = mask_bhwc.unsqueeze(-1)
+            else:
+                raise ValueError(f"Unexpected mask shape: {mask_bhwc.shape}")
+            mask_bhwc = self._pad_batch_to(mask_bhwc, max_frames)
+        else:
+            # Full white mask matching the layer dimensions
+            mask_bhwc = torch.ones((max_frames, l_h, l_w, 1), dtype=torch.float32, device=device)
+
+        # Make sure the mask matches the layer spatial dimensions
+        if mask_bhwc.shape[1:3] != layer_bhwc.shape[1:3]:
+            mask_bhwc = self._resize_bhwc(mask_bhwc, layer_bhwc.shape[1], layer_bhwc.shape[2])
+
+        # Full-frame composite mask (B, H, W) - tracks where the layer ends up
+        output_mask = torch.zeros((max_frames, bg_h, bg_w), dtype=torch.float32, device=device)
+
+        opacity_factor = opacity / 100.0
+        effective_mask_layer = mask_bhwc * opacity_factor
+
+        blend_mode = blend_mode.lower()
+
+        if blend_corner == "none":
+            # --- Original behaviour: resize layer (and mask) to cover background ---
+            if layer_bhwc.shape[1:3] != (bg_h, bg_w):
+                layer_bhwc = self._resize_bhwc(layer_bhwc, bg_h, bg_w)
+                effective_mask_layer = self._resize_bhwc(effective_mask_layer, bg_h, bg_w)
+
+            blended = self._get_blended(bg_bhwc, layer_bhwc, blend_mode)
+
+            output_bhwc = bg_bhwc * (1.0 - effective_mask_layer) + blended * effective_mask_layer
+            output_bhwc = torch.clamp(output_bhwc, 0.0, 1.0)
+            output_mask = effective_mask_layer.squeeze(-1).clamp(0.0, 1.0)
+
+        elif blend_corner in ("concat_left", "concat_right", "concat_up", "concat_down"):
+            # --- Concat mode: resize the layer to match the background along the
+            #     concat axis (aspect kept), then place it before/after the
+            #     background along that axis instead of blending on top ---
+            horizontal = blend_corner in ("concat_left", "concat_right")
+
+            if horizontal:
+                new_h = bg_h
+                new_w = max(1, int(round(l_w * (bg_h / l_h))))
+            else:
+                new_w = bg_w
+                new_h = max(1, int(round(l_h * (bg_w / l_w))))
+
+            layer_resized = self._resize_bhwc(layer_bhwc, new_h, new_w)
+            mask_resized = self._resize_bhwc(effective_mask_layer, new_h, new_w)
+            layer_mask_out = mask_resized.squeeze(-1).clamp(0.0, 1.0)
+            bg_mask_out = torch.zeros((max_frames, bg_h, bg_w), dtype=torch.float32, device=device)
+
+            layer_first = blend_corner in ("concat_left", "concat_up")  # place layer before background
+            cat_dim = 2 if horizontal else 1  # width axis : height axis
+
+            image_parts = [layer_resized, bg_bhwc] if layer_first else [bg_bhwc, layer_resized]
+            mask_parts = [layer_mask_out, bg_mask_out] if layer_first else [bg_mask_out, layer_mask_out]
+
+            output_bhwc = torch.clamp(torch.cat(image_parts, dim=cat_dim), 0.0, 1.0)
+            output_mask = torch.cat(mask_parts, dim=cat_dim)
+
+        else:
+            # --- Corner snap mode: layer keeps its own size, snapped to a bg corner ---
+            # Crop the layer (and mask) if it's larger than the background
+            crop_y0, crop_x0 = 0, 0
+            crop_h, crop_w = l_h, l_w
+
+            if l_h > bg_h:
+                crop_h = bg_h
+                crop_y0 = l_h - bg_h if "bottom" in blend_corner else 0
+            if l_w > bg_w:
+                crop_w = bg_w
+                crop_x0 = l_w - bg_w if "right" in blend_corner else 0
+
+            layer_crop = layer_bhwc[:, crop_y0:crop_y0 + crop_h, crop_x0:crop_x0 + crop_w, :]
+            mask_crop = effective_mask_layer[:, crop_y0:crop_y0 + crop_h, crop_x0:crop_x0 + crop_w, :]
+
+            # Placement offset on the background
+            y0 = bg_h - crop_h if "bottom" in blend_corner else 0
+            x0 = bg_w - crop_w if "right" in blend_corner else 0
+
+            bg_region = bg_bhwc[:, y0:y0 + crop_h, x0:x0 + crop_w, :]
+
+            blended = self._get_blended(bg_region, layer_crop, blend_mode)
+
+            composited = bg_region * (1.0 - mask_crop) + blended * mask_crop
+
+            output_bhwc = bg_bhwc.clone()
+            output_bhwc[:, y0:y0 + crop_h, x0:x0 + crop_w, :] = composited
+            output_bhwc = torch.clamp(output_bhwc, 0.0, 1.0)
+
+            output_mask[:, y0:y0 + crop_h, x0:x0 + crop_w] = mask_crop.squeeze(-1).clamp(0.0, 1.0)
+
+        # --- Optional: center-crop output so width/height are divisible by 32 ---
+        if resize_to_32:
+            output_mask_4d = output_mask.unsqueeze(-1)  # BHW -> BHWC(1ch) for shared helpers
+            output_bhwc, cropped = self._center_crop_to_multiple(output_bhwc, 32)
+            output_mask_4d, _ = self._center_crop_to_multiple(output_mask_4d, 32)
+            if cropped:
+                print(f"[INFO] resize_to_32: center-cropping output to "
+                      f"{output_bhwc.shape[2]}x{output_bhwc.shape[1]}.")
+            output_mask = output_mask_4d.squeeze(-1)
+
+        # --- Optional low-megapixel copy of the output (image_low / mask_low) ---
+        if low_MP > 0.0:
+            src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
+            scale = ((low_MP * 1_000_000.0) / (src_h * src_w)) ** 0.5
+            low_w = max(1, int(round(src_w * scale)))
+            low_h = max(1, int(round(src_h * scale)))
+
+            image_low = self._resize_bhwc(output_bhwc, low_h, low_w)
+            mask_low = self._resize_bhwc(output_mask.unsqueeze(-1), low_h, low_w)
+
+            # Keep the low outputs divisible by 32 too when requested
+            if resize_to_32:
+                image_low, cropped = self._center_crop_to_multiple(image_low, 32)
+                mask_low, _ = self._center_crop_to_multiple(mask_low, 32)
+                if cropped:
+                    print(f"[INFO] resize_to_32: center-cropping low output to "
+                          f"{image_low.shape[2]}x{image_low.shape[1]}.")
+
+            print(f"[INFO] low_MP: scaled output {src_w}x{src_h} -> "
+                  f"{image_low.shape[2]}x{image_low.shape[1]} ({low_MP} MP).")
+        else:
+            image_low = output_bhwc
+            mask_low = output_mask.unsqueeze(-1)
+
+        return (output_bhwc.cpu(), output_mask.cpu(),
+                image_low.cpu(), mask_low.squeeze(-1).cpu())
+
+    def _get_blended(self, background, layer, blend_mode):
+        """Dispatch to the inherited blend_* functions."""
+        if blend_mode == "normal":
+            return self.blend_normal(background, layer)
+        elif blend_mode == "multiply":
+            return self.blend_multiply(background, layer)
+        elif blend_mode == "screen":
+            return self.blend_screen(background, layer)
+        elif blend_mode == "overlay":
+            return self.blend_overlay(background, layer)
+        elif blend_mode == "add":
+            return self.blend_add(background, layer)
+        elif blend_mode == "subtract":
+            return self.blend_subtract(background, layer)
+        elif blend_mode == "difference":
+            return self.blend_difference(background, layer)
+        elif blend_mode == "darken":
+            return self.blend_darken(background, layer)
+        elif blend_mode == "lighten":
+            return self.blend_lighten(background, layer)
+        else:
+            print(f"[WARNING] Unsupported blend mode '{blend_mode}'. Using 'normal'.")
+            return self.blend_normal(background, layer)
+
+
 class CreateImageList:
     @classmethod
     def INPUT_TYPES(s):
@@ -1784,6 +2062,7 @@ NODE_CLASS_MAPPINGS = {
     "CreateImageList": CreateImageList,
     "ImageBlur_GPU": ImageBlur_GPU,
     "ImageBlend_GPU": ImageBlend_GPU,
+    "ImageBlend_GPU_advanced": ImageBlend_GPU_advanced,
     "WanScaleAB": WanScaleAB
 }
 
@@ -1791,5 +2070,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CreateImageList": "Create Image List",
     "ImageBlur_GPU": "Image Blur (GPU)",
     "ImageBlend_GPU": "Image Blend (GPU)",
+    "ImageBlend_GPU_advanced": "Image Blend (GPU) Advanced",
     "WanScaleAB": "Wan Scale AB"
 }

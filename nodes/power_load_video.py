@@ -5,6 +5,7 @@ Similar to LoadImage but for videos, with an integrated timeline UI.
 
 import os
 import re
+import threading
 import subprocess
 import cv2
 import numpy as np
@@ -12,6 +13,18 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 import folder_paths
+import comfy.model_management
+from comfy.utils import ProgressBar
+
+
+def _abort_if_interrupted():
+    """Raise ComfyUI's InterruptProcessingException when the user stopped the run.
+
+    ComfyUI's executor catches this and marks the run as interrupted instead
+    of as an error, so long processing loops can poll it to become responsive
+    to the Stop button.
+    """
+    comfy.model_management.throw_exception_if_processing_interrupted()
 
 
 def _find_ffmpeg():
@@ -146,13 +159,19 @@ def _lanczos_stretch(tensor, target_w, target_h):
     return t.permute(0, 2, 3, 1).contiguous()
 
 
-def extract_audio(file_path, start_time=0, duration=0):
+def extract_audio(file_path, start_time=0, duration=0, pbar=None, pbar_base=0, pbar_units=0):
     """Extract audio from a video file using ffmpeg.
 
     Args:
         file_path: Path to the video file.
         start_time: Start time in seconds.
         duration: Duration in seconds (0 = until end).
+        pbar: Optional comfy.utils.ProgressBar to report decoding progress.
+            ffmpeg's -progress output is parsed from stderr and mapped onto
+            pbar_units "units" starting at pbar_base (1 unit ~ 1 second of
+            audio), so audio extraction can extend an existing progress bar.
+        pbar_base: Progress value the audio phase starts from.
+        pbar_units: How many progress units the audio phase spans.
 
     Returns:
         dict: {"waveform": Tensor[1, C, T], "sample_rate": int} or None.
@@ -163,15 +182,95 @@ def extract_audio(file_path, start_time=0, duration=0):
         args += ["-ss", str(start_time)]
     if duration > 0:
         args += ["-t", str(duration)]
+    # Machine-readable progress on stderr (interleaved with the normal log,
+    # which the drain thread parses and also keeps for the sample-rate regex)
+    if pbar is not None and pbar_units > 0:
+        args += ["-progress", "pipe:2", "-nostats"]
+    args += ["-f", "f32le", "-"]
+
     try:
-        res = subprocess.run(
-            args + ["-f", "f32le", "-"],
-            capture_output=True, check=True,
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-        audio = torch.frombuffer(bytearray(res.stdout), dtype=torch.float32)
-        match = re.search(r', (\d+) Hz, (\w+), ', res.stderr.decode('utf-8', errors='replace'))
-    except subprocess.CalledProcessError:
+    except Exception:
         return None
+
+    # Drain stderr in the background so the pipe can't fill up and stall
+    # ffmpeg. Reads line-by-line so ffmpeg's -progress output can be parsed
+    # live for the progress bar; the full text is still kept for the
+    # end-of-run sample rate/layout parse.
+    err_holder = []
+
+    def _drain_stderr(pipe, sink, pbar=None, pbar_base=0, pbar_units=0):
+        try:
+            for raw_line in iter(pipe.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace")
+                sink.append(line)
+                if pbar is None or pbar_units <= 0:
+                    continue
+                # out_time_us= / out_time_ms= (both are microseconds in ffmpeg)
+                if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                    try:
+                        us = int(line.split("=", 1)[1].strip())
+                    except ValueError:
+                        continue
+                    seconds = max(0, us / 1_000_000.0)
+                    value = pbar_base + min(int(seconds), pbar_units)
+                    # Do NOT pass a new total: the shared bar's total was set
+                    # up front in load_video; update_absolute caps at it.
+                    pbar.update_absolute(value)
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(
+        target=_drain_stderr,
+        args=(proc.stderr, err_holder),
+        kwargs={"pbar": pbar, "pbar_base": pbar_base, "pbar_units": pbar_units},
+        daemon=True,
+    )
+    stderr_thread.start()
+
+    # Read stdout in the background while the main thread polls the ComfyUI
+    # interrupt flag, so stopping the run kills ffmpeg immediately instead of
+    # waiting for it to decode the entire audio track.
+    out = bytearray()
+    stdout_done = threading.Event()
+
+    def _read_stdout():
+        try:
+            while True:
+                chunk = proc.stdout.read(1 << 20)
+                if not chunk:
+                    break
+                out.extend(chunk)
+        except Exception:
+            pass
+        finally:
+            stdout_done.set()
+
+    stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+    stdout_thread.start()
+
+    try:
+        while not stdout_done.wait(timeout=0.25):
+            _abort_if_interrupted()
+        stderr_thread.join(timeout=5.0)
+        returncode = proc.wait(timeout=30.0)
+    except BaseException:
+        # Interrupted (or ffmpeg hung): kill the process and re-raise.
+        proc.kill()
+        proc.wait()
+        raise
+
+    if returncode != 0:
+        return None
+
+    try:
+        audio = torch.frombuffer(bytearray(out), dtype=torch.float32)
+        stderr_data = "".join(err_holder)
+        match = re.search(r', (\d+) Hz, (\w+), ', stderr_data)
     except Exception:
         return None
 
@@ -391,63 +490,89 @@ class PowerLoadVideo:
         # Read frames with force_fps logic (same as VideoHelperSuite)
         images = []
 
+        # Single continuous progress bar (same mechanism VHS Video Combine
+        # uses) spanning all three phases, with the total estimated UP FRONT so
+        # the bar only ever moves forward 0 -> 100:
+        #   phase 1: decoding source frames (1 unit per source frame)
+        #   phase 2: converting frames to tensor (1 unit per frame)
+        #   phase 3: extracting audio with ffmpeg (1 unit per second of audio)
+        expected_source_frames = last_idx - first_idx + 1
+        source_span = expected_source_frames / native_fps
         if force_fps == 0 or force_fps == native_fps:
-            # No FPS conversion needed - read normally
-            if full_video:
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    images.append(Image.fromarray(frame))
-            else:
-                for frame_idx in range(first_idx, last_idx + 1):
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                    ret, frame = cap.read()
-                    if ret:
+            expected_output_frames = expected_source_frames
+        else:
+            expected_output_frames = int(np.ceil(source_span * target_fps))
+        audio_units = max(1, int(np.ceil(source_span)))
+        pbar_total = expected_source_frames + expected_output_frames + audio_units
+        pbar = ProgressBar(pbar_total)
+
+        try:
+            if force_fps == 0 or force_fps == native_fps:
+                # No FPS conversion needed - read normally
+                if full_video:
+                    while True:
+                        _abort_if_interrupted()
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         images.append(Image.fromarray(frame))
-        else:
-            # Apply force_fps: skip or duplicate frames
-            time_per_native_frame = 1.0 / native_fps
-            time_per_target_frame = 1.0 / target_fps
-            current_time = 0.0
-            next_target_time = 0.0
-
-            if full_video:
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                    # Add frames at target times (may duplicate or skip)
-                    while next_target_time <= current_time:
-                        images.append(frame.copy())
-                        next_target_time += time_per_target_frame
-
-                    current_time += time_per_native_frame
+                        pbar.update(1)
+                else:
+                    for frame_idx in range(first_idx, last_idx + 1):
+                        _abort_if_interrupted()
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ret, frame = cap.read()
+                        if ret:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            images.append(Image.fromarray(frame))
+                        pbar.update(1)
             else:
-                for frame_idx in range(first_idx, last_idx + 1):
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Apply force_fps: skip or duplicate frames
+                time_per_native_frame = 1.0 / native_fps
+                time_per_target_frame = 1.0 / target_fps
+                current_time = 0.0
+                next_target_time = 0.0
 
-                    while next_target_time <= current_time:
-                        images.append(frame.copy())
-                        next_target_time += time_per_target_frame
+                if full_video:
+                    while True:
+                        _abort_if_interrupted()
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                    current_time += time_per_native_frame
+                        # Add frames at target times (may duplicate or skip)
+                        while next_target_time <= current_time:
+                            images.append(frame.copy())
+                            next_target_time += time_per_target_frame
 
-        cap.release()
+                        current_time += time_per_native_frame
+                        pbar.update(1)
+                else:
+                    for frame_idx in range(first_idx, last_idx + 1):
+                        _abort_if_interrupted()
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                        while next_target_time <= current_time:
+                            images.append(frame.copy())
+                            next_target_time += time_per_target_frame
+
+                        current_time += time_per_native_frame
+                        pbar.update(1)
+        finally:
+            cap.release()
 
         if not images:
             raise ValueError("No frames could be loaded from video")
 
-        # Convert to tensor
-        image_tensor = self.pil_totensor(images)
+        # Convert to tensor (second progress phase, same bar)
+        _abort_if_interrupted()
+        image_tensor = self.pil_totensor(images, pbar=pbar, pbar_base=expected_source_frames)
 
         # Apply crop if enabled
         if crop_enabled:
@@ -512,6 +637,7 @@ class PowerLoadVideo:
             # Small output: exact LANCZOS scale of the high-res result down to the
             # base target (stretch mode, no crop, still 32-divisible) so that
             # image and high_images stay pixel-aligned.
+            _abort_if_interrupted()
             small_w, small_h = _resolve_target_size(target_w, target_h, cur_w, cur_h)
             image_tensor = _lanczos_stretch(high_tensor, small_w, small_h)
             resized = True
@@ -524,14 +650,24 @@ class PowerLoadVideo:
             # preserved), then center-crop to the exact target dimensions.
             image_tensor = _lanczos_cover(image_tensor, target_w, target_h)
 
-        # Extract audio (skip trimming if full video)
+        # Extract audio (skip trimming if full video). The ffmpeg run is the
+        # third phase of the same bar (1 unit ~ 1 second of audio).
         audio = None
+        _abort_if_interrupted()
+        audio_pbar_base = expected_source_frames + len(images)
         if full_video:
-            audio = extract_audio(filename, start_time=0, duration=0)
+            audio = extract_audio(filename, start_time=0, duration=0,
+                                  pbar=pbar, pbar_base=audio_pbar_base,
+                                  pbar_units=audio_units)
         else:
             audio_start_time = first_idx / native_fps
             audio_duration = (last_idx - first_idx + 1) / native_fps
-            audio = extract_audio(filename, audio_start_time, audio_duration)
+            audio = extract_audio(filename, audio_start_time, audio_duration,
+                                  pbar=pbar, pbar_base=audio_pbar_base,
+                                  pbar_units=audio_units)
+        # Finish the bar (e.g. video has no audio stream, so ffmpeg produced
+        # no -progress output at all)
+        pbar.update_absolute(pbar.total)
 
         # Build metadata dict (note: start_offset is NOT included in output as it's a transient adjustment)
         video_metadata = {
@@ -566,12 +702,22 @@ class PowerLoadVideo:
         # high_images mirrors the regular image unless the high-res path was active
         return (image_tensor, high_tensor if high_active else image_tensor, audio, image_tensor.shape[0], video_metadata)
 
-    def pil_totensor(self, images):
-        """Convert list of PIL Images to PyTorch tensor [N, H, W, C] in [0, 1]."""
+    def pil_totensor(self, images, pbar=None, pbar_base=0):
+        """Convert list of PIL Images to PyTorch tensor [N, H, W, C] in [0, 1].
+
+        If a pbar is given, each converted frame advances the shared bar
+        (continuing from pbar_base). The total is NOT changed here - it was
+        estimated up front in load_video so the bar stays monotonic 0 -> 100.
+        """
         img_list = []
+        if pbar is not None:
+            pbar.update_absolute(pbar_base)
         for img in images:
+            _abort_if_interrupted()
             np_img = np.array(img.copy(), dtype=np.float32) / 255.0
             img_list.append(np_img)
+            if pbar is not None:
+                pbar.update(1)
         stacked = np.stack(img_list, axis=0)
         return torch.from_numpy(stacked)
 

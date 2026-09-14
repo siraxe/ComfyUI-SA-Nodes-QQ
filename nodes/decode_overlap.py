@@ -19,7 +19,7 @@ class TemporalSmoothingNode:
                 "sigma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0}),
             },
             "optional": {
-                "mode": (["gaussian", "optical_flow"], {"default": "gaussian"}),
+                "mode": (["gaussian", "gaussian_past", "optical_flow"], {"default": "gaussian"}),
             }
         }
 
@@ -56,27 +56,36 @@ class TemporalSmoothingNode:
         # Clone to avoid modifying input and ensure it's on the correct device
         processed = images.clone().to(device=device, dtype=torch.float32)
         
-        if mode == "gaussian":
-            weights = self.gaussian_kernel(kernel_size, sigma, device)
+        if mode in ("gaussian", "gaussian_past"):
+            past_only = (mode == "gaussian_past")
+            size = kernel_size // 2
+
+            if past_only:
+                # Causal kernel: current frame + past frames only (offsets 0 .. -size)
+                offsets = torch.arange(-size, 1, dtype=torch.float32, device=device)
+                weights = torch.exp(-offsets ** 2 / (2 * sigma ** 2))
+                weights /= weights.sum()
+            else:
+                # Symmetric kernel: past + current + future frames
+                weights = self.gaussian_kernel(kernel_size, sigma, device)
+
+            # Vectorized temporal convolution over all frames at once
+            chw = processed.permute(0, 3, 1, 2)  # (B, C, H, W)
             left = kernel_size // 2
-            offsets = torch.arange(-left, left + 1, device=device)
-            
-            for b in range(B):
-                frame = torch.zeros((H, W, C), dtype=torch.float32, device=device)
-                total_weight = 0.0
-                for i, offset in enumerate(offsets):
-                    nb = b + offset
-                    if 0 <= nb < B:
-                        frame += weights[i] * processed[nb]
-                        total_weight += weights[i]
-                    else:
-                        # Boundary handling: clamp
-                        nb_clamp = max(0, min(B - 1, nb))
-                        frame += weights[i] * processed[nb_clamp]
-                        total_weight += weights[i]
-                if total_weight > 0:
-                    frame /= total_weight
-                processed[b] = frame.to(dtype)
+            # Replicate-pad along the frame axis (F.pad can't pad dim 0)
+            padded = torch.cat([chw[:1].expand(left, -1, -1, -1), chw, chw[-1:].expand(left, -1, -1, -1)], dim=0)
+
+            if past_only:
+                # offsets[i] = i - size, so source frame index = b + i - size; after padding source starts at i
+                acc = torch.zeros_like(chw)
+                for i in range(size + 1):
+                    acc += weights[i] * padded[i:i + B]
+                processed = acc.permute(0, 2, 3, 1).contiguous()
+            else:
+                acc = torch.zeros_like(chw)
+                for i in range(kernel_size):
+                    acc += weights[i] * padded[i:i + B]
+                processed = acc.permute(0, 2, 3, 1).contiguous()
         elif mode == "optical_flow":
             # Load RAFT model
             weights = Raft_Small_Weights.DEFAULT
