@@ -223,7 +223,11 @@ def calc_lora_model_enhanced(model_diff, rank, prefix_model, prefix_lora, output
         print(f"VRAM usage at start: {get_vram_usage():.1%}")
 
     # Load model with strategic block management
-    comfy.model_management.load_models_gpu([model_diff], force_patch_weights=True)
+    try:
+        # force_patch_weights is no longer supported in newer ComfyUI model management
+        comfy.model_management.load_models_gpu([model_diff], force_patch_weights=True)
+    except (AssertionError, TypeError):
+        comfy.model_management.load_models_gpu([model_diff])
 
     # Apply strategic offloading instead of full CPU offload
     if vram_usage_mode != "conservative":

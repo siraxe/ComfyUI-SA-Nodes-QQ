@@ -272,8 +272,11 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       concat_up / concat_down: same, but the layer is resized to the background
       width and stacked on top / below the background.
     - resize_to_32: center-crop the final output so width/height are divisible by 32.
-    - low_MP: if > 0, proportionally scale the output to the given megapixels
-      and also output it (plus its mask) through the image_low / mask_low outputs.
+    - high_MP: if > 0, proportionally scale the main output (up or down) to the
+      given megapixels before resize_to_32 is applied.
+    - low_MP: if > 0, proportionally scale the (already high_MP-scaled) output
+      to the given megapixels and also output it (plus its mask) through the
+      image_low / mask_low outputs.
     - mask output: shows where the layer_image was placed on the background.
     """
     NODE_NAME = "Image Blend GPU Advanced"
@@ -296,6 +299,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 "blend_corner": (cls.BLEND_CORNERS, {"default": "none"}),
                 "opacity": ("INT", {"default": 100, "min": 0, "max": 100, "step": 1}),
                 "resize_to_32": ("BOOLEAN", {"default": False}),
+                "high_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                 "low_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
             },
             "optional": {
@@ -341,7 +345,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
     def image_blend_gpu_advanced(self, background_image, layer_image,
                                  blend_mode, blend_corner, opacity,
-                                 layer_mask=None, resize_to_32=False, low_MP=0.0):
+                                 layer_mask=None, resize_to_32=False,
+                                 high_MP=0.0, low_MP=0.0):
 
         device = background_image.device
 
@@ -472,6 +477,19 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             output_bhwc = torch.clamp(output_bhwc, 0.0, 1.0)
 
             output_mask[:, y0:y0 + crop_h, x0:x0 + crop_w] = mask_crop.squeeze(-1).clamp(0.0, 1.0)
+
+        # --- Optional high-megapixel scale of the main output (before resize_to_32) ---
+        if high_MP > 0.0:
+            src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
+            scale = ((high_MP * 1_000_000.0) / (src_h * src_w)) ** 0.5
+            high_w = max(1, int(round(src_w * scale)))
+            high_h = max(1, int(round(src_h * scale)))
+
+            if (high_h, high_w) != (src_h, src_w):
+                output_bhwc = self._resize_bhwc(output_bhwc, high_h, high_w)
+                output_mask = self._resize_bhwc(output_mask.unsqueeze(-1), high_h, high_w).squeeze(-1)
+                print(f"[INFO] high_MP: scaled output {src_w}x{src_h} -> "
+                      f"{high_w}x{high_h} ({high_MP} MP).")
 
         # --- Optional: center-crop output so width/height are divisible by 32 ---
         if resize_to_32:
