@@ -257,6 +257,57 @@ class ImageBlend_GPU:
         return (output_bhwc.cpu(),)
 
 
+class ImageBlendGrid:
+    """
+    Grid configuration node for Image Blend GPU Advanced.
+
+    Plug its output into the 'enable_grid' input of Image Blend GPU Advanced.
+    When 'enable' is not "false", that node builds an image grid out of the
+    background frames:
+
+    - enable "3x2" -> 3 columns x 2 rows (6 cells), "3x3" -> 9 cells.
+    - The background video length is normalized to 'frames': the last frame
+      is duplicated if the video is shorter, extra frames are dropped if it
+      is longer.
+    - One grid is built per output frame (sliding storyboard): frame t's
+      cells are evenly sampled over the frames from t to the end, so the
+      first cell is always the current frame and the window slides forward
+      until the last frame fills every cell. Each cell keeps the background
+      aspect ratio.
+    - The output canvas fits the grid exactly (e.g. 3x2 is only 2 cell-rows
+      tall), so there are no empty rows/columns around the grid.
+    - horizontal / vertical select which grid cell the mask output marks
+      (e.g. left/top -> the top-left cell is white in the mask, everything
+      else is black). The mask has one frame per output frame.
+    """
+    NODE_NAME = "Image Blend Grid"
+
+    GRID_LAYOUTS = ["false", "3x2", "3x3"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "enable": (cls.GRID_LAYOUTS, {"default": "false"}),
+                "horizontal": (["left", "middle", "right"], {"default": "left"}),
+                "vertical": (["top", "middle", "bottom"], {"default": "top"}),
+                "frames": ("INT", {"default": 22, "min": 5, "max": 1000000, "step": 17}),
+            }
+        }
+
+    RETURN_TYPES = ("GRID_CONFIG", "INT")
+    RETURN_NAMES = ("enable_grid", "frames")
+    FUNCTION = "build_grid_config"
+    CATEGORY = 'WanVideoWrapper_QQ/image'
+
+    def build_grid_config(self, enable, horizontal, vertical, frames):
+        return ({"enable": enable,
+                 "horizontal": horizontal,
+                 "vertical": vertical,
+                 "frames": int(frames)},
+                int(frames))
+
+
 class ImageBlend_GPU_advanced(ImageBlend_GPU):
     """
     Advanced image blend node.
@@ -278,6 +329,12 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       to the given megapixels and also output it (plus its mask) through the
       image_low / mask_low outputs.
     - mask output: shows where the layer_image was placed on the background.
+    - layer_image is optional: when not connected, no layer is composited and
+      the background alone goes through high_MP / resize_to_32 / low_MP.
+    - enable_grid (optional): plug the "Image Blend Grid" node here to build an
+      image grid out of the frames (background only, or the blended result when
+      a layer is connected) instead of the plain output. high_MP / resize_to_32 /
+      low_MP are applied after the grid.
     """
     NODE_NAME = "Image Blend GPU Advanced"
 
@@ -294,7 +351,6 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         return {
             "required": {
                 "background_image": ("IMAGE",), # BHWC tensor
-                "layer_image": ("IMAGE",),      # BHWC tensor
                 "blend_mode": (cls.BLEND_MODES,),
                 "blend_corner": (cls.BLEND_CORNERS, {"default": "none"}),
                 "opacity": ("INT", {"default": 100, "min": 0, "max": 100, "step": 1}),
@@ -303,7 +359,11 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 "low_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
             },
             "optional": {
+                "layer_image": ("IMAGE",),     # BHWC tensor (if omitted, only the
+                                               # background is processed: high_MP /
+                                               # resize_to_32 / low_MP still apply)
                 "layer_mask": ("MASK",),       # BHW tensor
+                "enable_grid": ("GRID_CONFIG",), # output of the Image Blend Grid node
             }
         }
 
@@ -343,17 +403,37 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         x0 = (w - target_w) // 2
         return tensor_bhwc[:, y0:y0 + target_h, x0:x0 + target_w, :], True
 
-    def image_blend_gpu_advanced(self, background_image, layer_image,
-                                 blend_mode, blend_corner, opacity,
-                                 layer_mask=None, resize_to_32=False,
-                                 high_MP=0.0, low_MP=0.0):
+    def image_blend_gpu_advanced(self, background_image, layer_image=None,
+                                 blend_mode="normal", blend_corner="none",
+                                 opacity=100, layer_mask=None,
+                                 resize_to_32=False, high_MP=0.0, low_MP=0.0,
+                                 enable_grid=None):
 
         device = background_image.device
 
         bg_bhwc = background_image.to(device, dtype=torch.float32)
-        layer_bhwc = layer_image.to(device, dtype=torch.float32)
 
         b_frames, bg_h, bg_w = bg_bhwc.shape[0], bg_bhwc.shape[1], bg_bhwc.shape[2]
+
+        # --- Ensure RGB channel counts ---
+        if bg_bhwc.shape[3] == 4:
+            print("[WARNING] Background has alpha, removing it.")
+            bg_bhwc = bg_bhwc[..., :3]
+        elif bg_bhwc.shape[3] == 1:
+            bg_bhwc = bg_bhwc.repeat(1, 1, 1, 3)
+
+        # --- No layer connected: pass the background through post-processing only ---
+        if layer_image is None:
+            if layer_mask is not None:
+                print("[WARNING] layer_mask is ignored because layer_image is not connected.")
+            print("[INFO] No layer_image connected, processing background only.")
+            output_bhwc = torch.clamp(bg_bhwc, 0.0, 1.0)
+            output_mask = torch.zeros((b_frames, bg_h, bg_w), dtype=torch.float32, device=device)
+            return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
+                                           resize_to_32, high_MP, low_MP)
+
+        layer_bhwc = layer_image.to(device, dtype=torch.float32)
+
         l_frames, l_h, l_w = layer_bhwc.shape[0], layer_bhwc.shape[1], layer_bhwc.shape[2]
         max_frames = max(b_frames, l_frames)
 
@@ -367,13 +447,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                   f"Repeating last layer frame to {max_frames}.")
             layer_bhwc = self._pad_batch_to(layer_bhwc, max_frames)
 
-        # --- Ensure RGB channel counts ---
-        if bg_bhwc.shape[3] == 4:
-            print("[WARNING] Background has alpha, removing it.")
-            bg_bhwc = bg_bhwc[..., :3]
-        elif bg_bhwc.shape[3] == 1:
-            bg_bhwc = bg_bhwc.repeat(1, 1, 1, 3)
-
+        # --- Ensure RGB channel counts (layer) ---
         if layer_bhwc.shape[3] == 4:
             layer_bhwc = layer_bhwc[..., :3]
         elif layer_bhwc.shape[3] == 1:
@@ -478,6 +552,101 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
             output_mask[:, y0:y0 + crop_h, x0:x0 + crop_w] = mask_crop.squeeze(-1).clamp(0.0, 1.0)
 
+        # --- Optional grid, then shared post-processing: high_MP / resize_to_32 / low_MP ---
+        return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
+                                       resize_to_32, high_MP, low_MP)
+
+    def _grid_and_finalize(self, output_bhwc, output_mask, enable_grid,
+                           resize_to_32, high_MP, low_MP):
+        """Apply the optional grid (from the Image Blend Grid node), then
+        run the shared high_MP / resize_to_32 / low_MP post-processing."""
+        if enable_grid is not None and str(enable_grid.get("enable", "false")).lower() != "false":
+            output_bhwc, output_mask = self._build_grid(output_bhwc, output_mask, enable_grid)
+        return self._finalize_output(output_bhwc, output_mask,
+                                     resize_to_32, high_MP, low_MP)
+
+    def _build_grid(self, output_bhwc, output_mask, grid_cfg):
+        """
+        Build a single-frame image grid (e.g. 3x2 / 3x3) from the output frames.
+
+        - The source is normalized to 'frames' frames (last frame duplicated
+          if shorter, truncated if longer).
+        - One grid is built per output frame: frame t's cells are evenly
+          sampled over [t .. frames-1] (first cell = current frame, window
+          slides forward, last frame fills every cell at the end). Each cell
+          keeps the source aspect ratio.
+        - The canvas fits the grid block exactly, so no empty rows/columns
+          are left around the grid (e.g. 3x2 -> canvas is 2 cell-rows tall).
+        - The returned mask is white only inside the cell selected by
+          horizontal + vertical (e.g. left/top -> top-left cell), black
+          elsewhere, with one frame per output frame.
+        """
+        layout = str(grid_cfg.get("enable", "false")).lower()
+        horizontal = str(grid_cfg.get("horizontal", "left")).lower()
+        vertical = str(grid_cfg.get("vertical", "top")).lower()
+        frames = int(grid_cfg.get("frames", 22))
+
+        try:
+            cols, rows = (int(v) for v in layout.split("x"))
+        except ValueError:
+            print(f"[WARNING] Invalid grid layout '{layout}', skipping grid.")
+            return output_bhwc, output_mask
+        if cols < 1 or rows < 1:
+            print(f"[WARNING] Invalid grid layout '{layout}', skipping grid.")
+            return output_bhwc, output_mask
+
+        src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
+        cell_w = max(1, src_w // cols)
+        cell_h = max(1, int(round(cell_w * (src_h / src_w))))
+        n_cells = cols * rows
+
+        # Canvas fits the grid block exactly (e.g. 3x2 -> 2 cell-rows tall),
+        # so no empty rows/columns are left around the grid.
+        canvas_h = rows * cell_h
+        canvas_w = cols * cell_w
+
+        # --- Normalize the source to exactly `frames` frames:
+        #     - video shorter than `frames`: last frame is duplicated
+        #     - video longer than `frames`: truncated to `frames` ---
+        src = self._pad_batch_to(output_bhwc, frames)
+        n_src = src.shape[0]
+
+        # --- Build one grid per output frame (sliding storyboard):
+        #     frame t's cells are evenly sampled over [t .. frames-1],
+        #     so the first cell is always the current frame and the window
+        #     slides forward until the last frame fills every cell ---
+        device = src.device
+        t_range = torch.arange(frames, device=device).unsqueeze(1)            # (F, 1)
+        base = torch.linspace(0, frames - 1, n_cells, device=device).unsqueeze(0)  # (1, C)
+        idx = (base + t_range).clamp(max=frames - 1).long()                   # (F, C)
+        sampled = src[idx]                                                    # (F, C, H, W, Ch)
+        sampled = sampled.reshape(frames * n_cells, src_h, src_w, sampled.shape[-1])
+        cells = self._resize_bhwc(sampled, cell_h, cell_w)
+        cells = cells.reshape(frames, rows, cols, cell_h, cell_w, -1)
+        canvas = cells.permute(0, 1, 3, 2, 4, 5).reshape(frames, canvas_h, canvas_w, -1)
+
+        # --- Mask only the cell selected by horizontal + vertical ---
+        # (e.g. left/top -> top-left cell; middle maps to the centre column/row,
+        #  or the last of two when there is no true middle)
+        col_idx = {"left": 0, "middle": cols // 2, "right": cols - 1}.get(horizontal, 0)
+        row_idx = {"top": 0, "middle": rows // 2, "bottom": rows - 1}.get(vertical, 0)
+        my, mx = row_idx * cell_h, col_idx * cell_w
+        grid_mask = torch.zeros((1, canvas_h, canvas_w), dtype=torch.float32, device=device)
+        grid_mask[0, my:my + cell_h, mx:mx + cell_w] = 1.0
+        grid_mask = grid_mask.repeat(frames, 1, 1)
+
+        print(f"[INFO] Grid '{layout}': sliding per-frame grid, {n_cells} cells of "
+              f"{cell_w}x{cell_h} on a {canvas_w}x{canvas_h} canvas "
+              f"(source had {output_bhwc.shape[0]} frame(s), normalized to {n_src}); "
+              f"mask marks the {vertical}/{horizontal} cell "
+              f"(row {row_idx + 1}/{rows}, col {col_idx + 1}/{cols}).")
+
+        return canvas, grid_mask
+
+    def _finalize_output(self, output_bhwc, output_mask,
+                         resize_to_32, high_MP, low_MP):
+        """Apply high_MP scaling, resize_to_32 cropping and the low_MP copy
+        to a composited (image, mask) pair and build the return tuple."""
         # --- Optional high-megapixel scale of the main output (before resize_to_32) ---
         if high_MP > 0.0:
             src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
