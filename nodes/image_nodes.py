@@ -265,7 +265,8 @@ class ImageBlendGrid:
     When 'enable' is not "false", that node builds an image grid out of the
     background frames:
 
-    - enable "3x2" -> 3 columns x 2 rows (6 cells), "3x3" -> 9 cells.
+    - enable "2x2" -> 2 columns x 2 rows (4 cells), "3x2" -> 6 cells,
+      "3x3" -> 9 cells.
     - The background video length is normalized to 'frames': the last frame
       is duplicated if the video is shorter, extra frames are dropped if it
       is longer.
@@ -282,7 +283,7 @@ class ImageBlendGrid:
     """
     NODE_NAME = "Image Blend Grid"
 
-    GRID_LAYOUTS = ["false", "3x2", "3x3"]
+    GRID_LAYOUTS = ["false", "2x2", "3x2", "3x3"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -323,6 +324,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       concat_up / concat_down: same, but the layer is resized to the background
       width and stacked on top / below the background.
     - resize_to_32: center-crop the final output so width/height are divisible by 32.
+    - mask_inner_erode: if > 0, erode the mask output inwards from its edges by that
+      many pixels (applied after resize_to_32; the image is not affected).
     - high_MP: if > 0, proportionally scale the main output (up or down) to the
       given megapixels before resize_to_32 is applied.
     - low_MP: if > 0, proportionally scale the (already high_MP-scaled) output
@@ -355,6 +358,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 "blend_corner": (cls.BLEND_CORNERS, {"default": "none"}),
                 "opacity": ("INT", {"default": 100, "min": 0, "max": 100, "step": 1}),
                 "resize_to_32": ("BOOLEAN", {"default": False}),
+                "mask_inner_erode": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 1}),
                 "high_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                 "low_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
             },
@@ -406,7 +410,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
     def image_blend_gpu_advanced(self, background_image, layer_image=None,
                                  blend_mode="normal", blend_corner="none",
                                  opacity=100, layer_mask=None,
-                                 resize_to_32=False, high_MP=0.0, low_MP=0.0,
+                                 resize_to_32=False, mask_inner_erode=0,
+                                 high_MP=0.0, low_MP=0.0,
                                  enable_grid=None):
 
         device = background_image.device
@@ -430,7 +435,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             output_bhwc = torch.clamp(bg_bhwc, 0.0, 1.0)
             output_mask = torch.zeros((b_frames, bg_h, bg_w), dtype=torch.float32, device=device)
             return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
-                                           resize_to_32, high_MP, low_MP)
+                                           resize_to_32, mask_inner_erode,
+                                           high_MP, low_MP)
 
         layer_bhwc = layer_image.to(device, dtype=torch.float32)
 
@@ -552,18 +558,21 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
             output_mask[:, y0:y0 + crop_h, x0:x0 + crop_w] = mask_crop.squeeze(-1).clamp(0.0, 1.0)
 
-        # --- Optional grid, then shared post-processing: high_MP / resize_to_32 / low_MP ---
+        # --- Optional grid, then shared post-processing: high_MP / resize_to_32 / mask_inner_erode / low_MP ---
         return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
-                                       resize_to_32, high_MP, low_MP)
+                                       resize_to_32, mask_inner_erode,
+                                       high_MP, low_MP)
 
     def _grid_and_finalize(self, output_bhwc, output_mask, enable_grid,
-                           resize_to_32, high_MP, low_MP):
+                           resize_to_32, mask_inner_erode, high_MP, low_MP):
         """Apply the optional grid (from the Image Blend Grid node), then
-        run the shared high_MP / resize_to_32 / low_MP post-processing."""
+        run the shared high_MP / resize_to_32 / mask_inner_erode / low_MP
+        post-processing."""
         if enable_grid is not None and str(enable_grid.get("enable", "false")).lower() != "false":
             output_bhwc, output_mask = self._build_grid(output_bhwc, output_mask, enable_grid)
         return self._finalize_output(output_bhwc, output_mask,
-                                     resize_to_32, high_MP, low_MP)
+                                     resize_to_32, mask_inner_erode,
+                                     high_MP, low_MP)
 
     def _build_grid(self, output_bhwc, output_mask, grid_cfg):
         """
@@ -643,10 +652,27 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
         return canvas, grid_mask
 
+    @staticmethod
+    def _erode_mask(mask_bhw, radius):
+        """Exact morphological erosion (square structuring element) of a BHW
+        mask, shrinking white areas by `radius` pixels on every side.
+
+        Implemented as a separable min-filter (horizontal + vertical pass)
+        instead of one large square kernel, which is much faster for big
+        radii, and padded with mask=0 so edges touching the canvas border
+        are eroded too."""
+        k = 2 * radius + 1
+        inv = 1.0 - mask_bhw.unsqueeze(1)  # B,1,H,W
+        inv = F.pad(inv, (radius,) * 4, mode='constant', value=1.0)
+        inv = F.max_pool2d(inv, kernel_size=(1, k), stride=1)  # horizontal pass
+        inv = F.max_pool2d(inv, kernel_size=(k, 1), stride=1)  # vertical pass
+        return (1.0 - inv).squeeze(1)
+
     def _finalize_output(self, output_bhwc, output_mask,
-                         resize_to_32, high_MP, low_MP):
-        """Apply high_MP scaling, resize_to_32 cropping and the low_MP copy
-        to a composited (image, mask) pair and build the return tuple."""
+                         resize_to_32, mask_inner_erode, high_MP, low_MP):
+        """Apply high_MP scaling, resize_to_32 cropping, mask_inner_erode mask
+        erosion and the low_MP copy to a composited (image, mask) pair and
+        build the return tuple."""
         # --- Optional high-megapixel scale of the main output (before resize_to_32) ---
         if high_MP > 0.0:
             src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
@@ -669,6 +695,20 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 print(f"[INFO] resize_to_32: center-cropping output to "
                       f"{output_bhwc.shape[2]}x{output_bhwc.shape[1]}.")
             output_mask = output_mask_4d.squeeze(-1)
+
+        # --- Optional: erode the mask inwards from its edges (inner feather).
+        #     The image is not affected; the mask shrinks by mask_inner_erode
+        #     pixels on every side of its selected area. ---
+        if mask_inner_erode > 0:
+            # Skip duplicate frames (e.g. grid masks are `frames` identical
+            # copies): erode one and repeat it back.
+            if output_mask.shape[0] > 1 and torch.all(output_mask == output_mask[:1]):
+                single = self._erode_mask(output_mask[:1], mask_inner_erode)
+                output_mask = single.repeat(output_mask.shape[0], 1, 1)
+            else:
+                output_mask = self._erode_mask(output_mask, mask_inner_erode)
+            print(f"[INFO] mask_inner_erode: eroded mask {mask_inner_erode}px inwards "
+                  f"from its edges.")
 
         # --- Optional low-megapixel copy of the output (image_low / mask_low) ---
         if low_MP > 0.0:
