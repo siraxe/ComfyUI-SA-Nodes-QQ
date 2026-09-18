@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 # Add parent directory to path for comfy imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import comfy.model_management
+import comfy.utils
 
 # Constants
 MAX_RESOLUTION = 8192
@@ -296,8 +297,8 @@ class ImageBlendGrid:
             }
         }
 
-    RETURN_TYPES = ("GRID_CONFIG", "INT")
-    RETURN_NAMES = ("enable_grid", "frames")
+    RETURN_TYPES = ("GRID_CONFIG", "INT", "STRING")
+    RETURN_NAMES = ("enable_grid", "frames", "selected_grid")
     FUNCTION = "build_grid_config"
     CATEGORY = 'WanVideoWrapper_QQ/image'
 
@@ -306,7 +307,8 @@ class ImageBlendGrid:
                  "horizontal": horizontal,
                  "vertical": vertical,
                  "frames": int(frames)},
-                int(frames))
+                int(frames),
+                str(enable))
 
 
 class ImageBlend_GPU_advanced(ImageBlend_GPU):
@@ -336,8 +338,10 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       the background alone goes through high_MP / resize_to_32 / low_MP.
     - enable_grid (optional): plug the "Image Blend Grid" node here to build an
       image grid out of the frames (background only, or the blended result when
-      a layer is connected) instead of the plain output. high_MP / resize_to_32 /
-      low_MP are applied after the grid.
+      a layer is connected) instead of the plain output. When high_MP > 0 the
+      grid canvas is sized to hit high_MP directly (cells are resized from the
+      full-resolution source in a single pass, preserving per-cell quality).
+      resize_to_32 / low_MP are applied after the grid.
     """
     NODE_NAME = "Image Blend GPU Advanced"
 
@@ -349,6 +353,15 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         "concat_up", "concat_down",
     ]
 
+    # "_aa" suffix = antialiased variant (much better for downscaling);
+    # "lanczos" = high quality windowed-sinc resampling (separable, with
+    # antialiasing when downscaling)
+    RESIZE_ALGOS = [
+        "lanczos",
+        "nearest", "bilinear", "bilinear_aa",
+        "bicubic", "bicubic_aa", "area",
+    ]
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -358,6 +371,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 "blend_corner": (cls.BLEND_CORNERS, {"default": "none"}),
                 "opacity": ("INT", {"default": 100, "min": 0, "max": 100, "step": 1}),
                 "resize_to_32": ("BOOLEAN", {"default": False}),
+                "scale_method": (cls.RESIZE_ALGOS, {"default": "lanczos"}),
                 "mask_inner_erode": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 1}),
                 "high_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                 "low_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
@@ -389,11 +403,64 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         return tensor_bhwc
 
     @staticmethod
-    def _resize_bhwc(tensor_bhwc, target_h, target_w):
-        """Bilinear resize of a BHWC tensor (works for images and single-channel masks)."""
+    def _lanczos_weights(in_size, out_size, device, a=3.0):
+        """Build a (out_size x in_size) separable Lanczos weight matrix.
+
+        Downscaling widens the kernel (support = a * max(1, in/out)) which
+        gives proper antialiasing; each output row is normalized to sum 1."""
+        scale = in_size / out_size
+        support = a * max(1.0, scale)
+        centers = (torch.arange(out_size, device=device, dtype=torch.float64) + 0.5) * scale
+        coords = torch.arange(in_size, device=device, dtype=torch.float64) + 0.5
+        x = centers.unsqueeze(1) - coords.unsqueeze(0)          # (out, in)
+        ax = x.abs()
+        w = torch.special.sinc(x) * torch.special.sinc(x / a)   # lanczos3 kernel
+        w = torch.where(ax < support, w, torch.zeros_like(w))
+        w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-12)     # normalize rows
+        return w
+
+    @classmethod
+    def _resize_lanczos_bhwc(cls, tensor_bhwc, target_h, target_w):
+        """Separable Lanczos resize of a BHWC tensor (antialiased when
+        downscaling). Output is clamped to the [0, 1] range."""
         bchw = tensor_bhwc.permute(0, 3, 1, 2)
-        resized = F.interpolate(bchw, size=(target_h, target_w), mode='bilinear', align_corners=False)
-        return resized.permute(0, 2, 3, 1)
+        w_w = cls._lanczos_weights(tensor_bhwc.shape[2], target_w, bchw.device).to(bchw.dtype)
+        w_h = cls._lanczos_weights(tensor_bhwc.shape[1], target_h, bchw.device).to(bchw.dtype)
+        out = torch.matmul(bchw, w_w.t())                                     # width pass
+        out = torch.matmul(out.permute(0, 1, 3, 2), w_h.t()).permute(0, 1, 3, 2)  # height pass
+        return out.permute(0, 2, 3, 1).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _resize_bhwc(tensor_bhwc, target_h, target_w, algo="lanczos"):
+        """Resize a BHWC tensor (works for images and single-channel masks).
+
+        algo: one of RESIZE_ALGOS; "_aa" suffix selects the antialiased
+        variant (recommended when downscaling); "lanczos" uses the same
+        reference implementation as ComfyUI's built-in "Upscale Image By"
+        node (comfy.utils.common_upscale -> PIL LANCZOS) for images, and the
+        separable antialiased Lanczos kernel for single-channel masks (the
+        PIL path quantizes to 8-bit, which would band soft mask edges)."""
+        if algo == "lanczos":
+            if tensor_bhwc.shape[-1] == 1:
+                # Mask: keep float precision, use the torch Lanczos kernel
+                return ImageBlend_GPU_advanced._resize_lanczos_bhwc(tensor_bhwc, target_h, target_w)
+            # Image: same path as ComfyUI's "Upscale Image By" node
+            bchw = tensor_bhwc.permute(0, 3, 1, 2)
+            out = comfy.utils.common_upscale(bchw, target_w, target_h, "lanczos", "disabled")
+            return out.permute(0, 2, 3, 1).to(tensor_bhwc.dtype)
+        bchw = tensor_bhwc.permute(0, 3, 1, 2)
+        if algo.endswith("_aa"):
+            base = algo[:-3]  # bilinear / bicubic
+            resized = F.interpolate(bchw, size=(target_h, target_w), mode=base,
+                                    align_corners=False, antialias=True)
+        elif algo in ("bilinear", "bicubic"):
+            resized = F.interpolate(bchw, size=(target_h, target_w), mode=algo,
+                                    align_corners=False)
+        else:  # nearest / area
+            resized = F.interpolate(bchw, size=(target_h, target_w), mode=algo)
+        # bicubic can overshoot the [0, 1] range; everything in this node
+        # (images and masks) lives in [0, 1], so clamp it back.
+        return resized.permute(0, 2, 3, 1).clamp(0.0, 1.0)
 
     @staticmethod
     def _center_crop_to_multiple(tensor_bhwc, divisor=32):
@@ -410,7 +477,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
     def image_blend_gpu_advanced(self, background_image, layer_image=None,
                                  blend_mode="normal", blend_corner="none",
                                  opacity=100, layer_mask=None,
-                                 resize_to_32=False, mask_inner_erode=0,
+                                 resize_to_32=False, scale_method="lanczos",
+                                 mask_inner_erode=0,
                                  high_MP=0.0, low_MP=0.0,
                                  enable_grid=None):
 
@@ -435,7 +503,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             output_bhwc = torch.clamp(bg_bhwc, 0.0, 1.0)
             output_mask = torch.zeros((b_frames, bg_h, bg_w), dtype=torch.float32, device=device)
             return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
-                                           resize_to_32, mask_inner_erode,
+                                           resize_to_32, scale_method,
+                                           mask_inner_erode,
                                            high_MP, low_MP)
 
         layer_bhwc = layer_image.to(device, dtype=torch.float32)
@@ -477,7 +546,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
         # Make sure the mask matches the layer spatial dimensions
         if mask_bhwc.shape[1:3] != layer_bhwc.shape[1:3]:
-            mask_bhwc = self._resize_bhwc(mask_bhwc, layer_bhwc.shape[1], layer_bhwc.shape[2])
+            mask_bhwc = self._resize_bhwc(mask_bhwc, layer_bhwc.shape[1], layer_bhwc.shape[2], scale_method)
 
         # Full-frame composite mask (B, H, W) - tracks where the layer ends up
         output_mask = torch.zeros((max_frames, bg_h, bg_w), dtype=torch.float32, device=device)
@@ -490,8 +559,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         if blend_corner == "none":
             # --- Original behaviour: resize layer (and mask) to cover background ---
             if layer_bhwc.shape[1:3] != (bg_h, bg_w):
-                layer_bhwc = self._resize_bhwc(layer_bhwc, bg_h, bg_w)
-                effective_mask_layer = self._resize_bhwc(effective_mask_layer, bg_h, bg_w)
+                layer_bhwc = self._resize_bhwc(layer_bhwc, bg_h, bg_w, scale_method)
+                effective_mask_layer = self._resize_bhwc(effective_mask_layer, bg_h, bg_w, scale_method)
 
             blended = self._get_blended(bg_bhwc, layer_bhwc, blend_mode)
 
@@ -512,8 +581,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 new_w = bg_w
                 new_h = max(1, int(round(l_h * (bg_w / l_w))))
 
-            layer_resized = self._resize_bhwc(layer_bhwc, new_h, new_w)
-            mask_resized = self._resize_bhwc(effective_mask_layer, new_h, new_w)
+            layer_resized = self._resize_bhwc(layer_bhwc, new_h, new_w, scale_method)
+            mask_resized = self._resize_bhwc(effective_mask_layer, new_h, new_w, scale_method)
             layer_mask_out = mask_resized.squeeze(-1).clamp(0.0, 1.0)
             bg_mask_out = torch.zeros((max_frames, bg_h, bg_w), dtype=torch.float32, device=device)
 
@@ -560,21 +629,30 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
         # --- Optional grid, then shared post-processing: high_MP / resize_to_32 / mask_inner_erode / low_MP ---
         return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
-                                       resize_to_32, mask_inner_erode,
+                                       resize_to_32, scale_method,
+                                       mask_inner_erode,
                                        high_MP, low_MP)
 
     def _grid_and_finalize(self, output_bhwc, output_mask, enable_grid,
-                           resize_to_32, mask_inner_erode, high_MP, low_MP):
+                           resize_to_32, scale_method, mask_inner_erode,
+                           high_MP, low_MP):
         """Apply the optional grid (from the Image Blend Grid node), then
         run the shared high_MP / resize_to_32 / mask_inner_erode / low_MP
         post-processing."""
         if enable_grid is not None and str(enable_grid.get("enable", "false")).lower() != "false":
-            output_bhwc, output_mask = self._build_grid(output_bhwc, output_mask, enable_grid)
+            # _build_grid sizes its canvas to hit high_MP directly (single-pass
+            # cell resize), so pass high_MP=0.0 to _finalize_output to avoid a
+            # redundant (and rounding-noisy) second resize of the canvas.
+            output_bhwc, output_mask = self._build_grid(output_bhwc, output_mask, enable_grid,
+                                                        scale_method, high_MP)
+            high_MP = 0.0
         return self._finalize_output(output_bhwc, output_mask,
-                                     resize_to_32, mask_inner_erode,
+                                     resize_to_32, scale_method,
+                                     mask_inner_erode,
                                      high_MP, low_MP)
 
-    def _build_grid(self, output_bhwc, output_mask, grid_cfg):
+    def _build_grid(self, output_bhwc, output_mask, grid_cfg, scale_method="lanczos",
+                    high_MP=0.0):
         """
         Build a single-frame image grid (e.g. 3x2 / 3x3) from the output frames.
 
@@ -586,6 +664,11 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
           keeps the source aspect ratio.
         - The canvas fits the grid block exactly, so no empty rows/columns
           are left around the grid (e.g. 3x2 -> canvas is 2 cell-rows tall).
+        - Cell sizing: with high_MP > 0 the cells are sized so the finished
+          canvas matches high_MP directly (each cell is resized from the
+          full-resolution source in a single pass - no down-then-up double
+          resampling). With high_MP == 0 the legacy sizing is kept (each cell
+          is src_w // cols wide, canvas ends up at one source frame's size).
         - The returned mask is white only inside the cell selected by
           horizontal + vertical (e.g. left/top -> top-left cell), black
           elsewhere, with one frame per output frame.
@@ -605,8 +688,21 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             return output_bhwc, output_mask
 
         src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
-        cell_w = max(1, src_w // cols)
-        cell_h = max(1, int(round(cell_w * (src_h / src_w))))
+        if high_MP > 0.0:
+            # Size the cells so the finished canvas matches high_MP directly:
+            # each cell is resized from the full-resolution source in one
+            # pass (max quality, no down-then-up double resampling).
+            aspect = (cols * src_w) / (rows * src_h)
+            canvas_w = max(1, int(round(((high_MP * 1_000_000.0) * aspect) ** 0.5)))
+            canvas_h = max(1, int(round((high_MP * 1_000_000.0) / canvas_w)))
+            cell_w = max(1, canvas_w // cols)
+            cell_h = max(1, canvas_h // rows)
+            canvas_w, canvas_h = cell_w * cols, cell_h * rows
+        else:
+            # Legacy sizing: cell width = src_w // cols (canvas ends up at
+            # roughly one source frame's resolution).
+            cell_w = max(1, src_w // cols)
+            cell_h = max(1, int(round(cell_w * (src_h / src_w))))
         n_cells = cols * rows
 
         # Canvas fits the grid block exactly (e.g. 3x2 -> 2 cell-rows tall),
@@ -630,7 +726,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         idx = (base + t_range).clamp(max=frames - 1).long()                   # (F, C)
         sampled = src[idx]                                                    # (F, C, H, W, Ch)
         sampled = sampled.reshape(frames * n_cells, src_h, src_w, sampled.shape[-1])
-        cells = self._resize_bhwc(sampled, cell_h, cell_w)
+        cells = self._resize_bhwc(sampled, cell_h, cell_w, scale_method)
         cells = cells.reshape(frames, rows, cols, cell_h, cell_w, -1)
         canvas = cells.permute(0, 1, 3, 2, 4, 5).reshape(frames, canvas_h, canvas_w, -1)
 
@@ -646,7 +742,9 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
         print(f"[INFO] Grid '{layout}': sliding per-frame grid, {n_cells} cells of "
               f"{cell_w}x{cell_h} on a {canvas_w}x{canvas_h} canvas "
-              f"(source had {output_bhwc.shape[0]} frame(s), normalized to {n_src}); "
+              f"(~{canvas_w * canvas_h / 1_000_000.0:.2f} MP"
+              f"{f', target {high_MP} MP' if high_MP > 0.0 else ', legacy sizing - set high_MP to control quality'}"
+              f"; source had {output_bhwc.shape[0]} frame(s), normalized to {n_src}); "
               f"mask marks the {vertical}/{horizontal} cell "
               f"(row {row_idx + 1}/{rows}, col {col_idx + 1}/{cols}).")
 
@@ -669,10 +767,11 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         return (1.0 - inv).squeeze(1)
 
     def _finalize_output(self, output_bhwc, output_mask,
-                         resize_to_32, mask_inner_erode, high_MP, low_MP):
+                         resize_to_32, scale_method, mask_inner_erode,
+                         high_MP, low_MP):
         """Apply high_MP scaling, resize_to_32 cropping, mask_inner_erode mask
         erosion and the low_MP copy to a composited (image, mask) pair and
-        build the return tuple."""
+        build the return tuple. All resizes use the selected scale_method."""
         # --- Optional high-megapixel scale of the main output (before resize_to_32) ---
         if high_MP > 0.0:
             src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
@@ -681,8 +780,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             high_h = max(1, int(round(src_h * scale)))
 
             if (high_h, high_w) != (src_h, src_w):
-                output_bhwc = self._resize_bhwc(output_bhwc, high_h, high_w)
-                output_mask = self._resize_bhwc(output_mask.unsqueeze(-1), high_h, high_w).squeeze(-1)
+                output_bhwc = self._resize_bhwc(output_bhwc, high_h, high_w, scale_method)
+                output_mask = self._resize_bhwc(output_mask.unsqueeze(-1), high_h, high_w, scale_method).squeeze(-1)
                 print(f"[INFO] high_MP: scaled output {src_w}x{src_h} -> "
                       f"{high_w}x{high_h} ({high_MP} MP).")
 
@@ -717,8 +816,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             low_w = max(1, int(round(src_w * scale)))
             low_h = max(1, int(round(src_h * scale)))
 
-            image_low = self._resize_bhwc(output_bhwc, low_h, low_w)
-            mask_low = self._resize_bhwc(output_mask.unsqueeze(-1), low_h, low_w)
+            image_low = self._resize_bhwc(output_bhwc, low_h, low_w, scale_method)
+            mask_low = self._resize_bhwc(output_mask.unsqueeze(-1), low_h, low_w, scale_method)
 
             # Keep the low outputs divisible by 32 too when requested
             if resize_to_32:
