@@ -5,6 +5,7 @@
 
 import { safeSetSessionItem } from './image-cache.js';
 import { recenterBackgroundVideo } from '../canvas/canvas_video_background.js';
+import { isLayerWidget } from '../layer_widget_identity.js';
 
 /**
  * Create dimension manager instance
@@ -294,17 +295,7 @@ export function createDimensionManager(node) {
       const scaleX = newWidth / oldWidth;
       const scaleY = newHeight / oldHeight;
 
-      const splineWidgets = node.widgets?.filter(w => {
-        const PowerSplineWidget = window.PowerSplineWidget;
-        const HandDrawLayerWidget = window.HandDrawLayerWidget;
-        const BoxLayerWidget = window.BoxLayerWidget;
-
-        return (
-          w instanceof PowerSplineWidget ||
-          w instanceof HandDrawLayerWidget ||
-          w instanceof BoxLayerWidget
-        );
-      });
+      const splineWidgets = node.widgets?.filter(isLayerWidget);
 
       if (!splineWidgets?.length) {
         return;

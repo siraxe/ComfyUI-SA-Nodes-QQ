@@ -22,6 +22,7 @@ import { PowerSplineWidget } from './layer_type_spline.js';
 import { HandDrawLayerWidget } from './layer_type_draw.js';
 import { BoxLayerWidget } from './layer_type_box.js';
 import { hasBackgroundVideo, syncVideoToFrame } from './canvas/canvas_video_background.js';
+import { getLayerWidgetType as getLayerWidgetValueType, isLayerWidget } from './layer_widget_identity.js';
 
 /**
  * SplineLayerManager - Manages the lifecycle of all layer widgets
@@ -91,11 +92,7 @@ export class SplineLayerManager {
     }
 
     getSplineWidgets() {
-        return this.node.widgets.filter(w =>
-            (w instanceof PowerSplineWidget) ||
-            (w instanceof HandDrawLayerWidget) ||
-            (w instanceof BoxLayerWidget)
-        );
+        return this.node.widgets.filter(isLayerWidget);
     }
 
     addNewSpline(name) {
@@ -137,7 +134,7 @@ export class SplineLayerManager {
             let insertIndex = headerIndex + 1;
             for (let i = headerIndex + 1; i < this.node.widgets.length; i++) {
                 const wi = this.node.widgets[i];
-                if (wi instanceof PowerSplineWidget || wi instanceof HandDrawLayerWidget || wi instanceof BoxLayerWidget) {
+                if (isLayerWidget(wi)) {
                     insertIndex = i + 1;
                 } else {
                     break;
@@ -172,7 +169,7 @@ export class SplineLayerManager {
             let insertIndex = headerIndex + 1;
             for (let i = headerIndex + 1; i < this.node.widgets.length; i++) {
                 const wi = this.node.widgets[i];
-                if (wi instanceof PowerSplineWidget || wi instanceof HandDrawLayerWidget || wi instanceof BoxLayerWidget) {
+                if (isLayerWidget(wi)) {
                     insertIndex = i + 1;
                 } else {
                     break;
@@ -221,7 +218,7 @@ export class SplineLayerManager {
             let insertIndex = headerIndex + 1;
             for (let i = headerIndex + 1; i < this.node.widgets.length; i++) {
                 const wi = this.node.widgets[i];
-                if (wi instanceof PowerSplineWidget || wi instanceof HandDrawLayerWidget || wi instanceof BoxLayerWidget) {
+                if (isLayerWidget(wi)) {
                     insertIndex = i + 1;
                 } else {
                     break;
@@ -351,8 +348,9 @@ export class SplineLayerManager {
             this.node?.editor?.exitHanddrawMode?.(false);
         } catch {}
         this.node.splineWidgetsCounter++;
-        const isHand = sourceWidget instanceof HandDrawLayerWidget;
-        const isBox = sourceWidget instanceof BoxLayerWidget;
+        const sourceType = getLayerWidgetValueType(sourceWidget);
+        const isHand = sourceType === 'handdraw';
+        const isBox = sourceType === 'box_layer';
         const WidgetClass = isHand ? HandDrawLayerWidget : (isBox ? BoxLayerWidget : PowerSplineWidget);
         const widgetIdPrefix = isBox ? "box_" : "spline_";
         const newWidget = new WidgetClass(widgetIdPrefix + this.node.splineWidgetsCounter);
@@ -380,7 +378,7 @@ export class SplineLayerManager {
                 let insertIndex = headerIndex + 1;
                 for (let i = headerIndex + 1; i < this.node.widgets.length; i++) {
                     const wi = this.node.widgets[i];
-                    if (wi instanceof PowerSplineWidget || wi instanceof HandDrawLayerWidget || wi instanceof BoxLayerWidget) {
+                    if (isLayerWidget(wi)) {
                         insertIndex = i + 1;
                     } else {
                         break;
@@ -432,10 +430,7 @@ export class SplineLayerManager {
     }
 
     recreateSplinesFromData(widgets_values) {
-        this.node.widgets = this.node.widgets.filter(w =>
-            !(w instanceof PowerSplineWidget) &&
-            !(w instanceof HandDrawLayerWidget) &&
-            !(w instanceof BoxLayerWidget));
+        this.node.widgets = this.node.widgets.filter(w => !isLayerWidget(w));
 
         // Create a map of widget data by name for safe, unambiguous lookup
         // This prevents any cross-contamination between widget values
@@ -489,7 +484,7 @@ export class SplineLayerManager {
                 let insertIndex = headerIndex + 1;
                 for (let i = headerIndex + 1; i < this.node.widgets.length; i++) {
                     const wi = this.node.widgets[i];
-                    if (wi instanceof PowerSplineWidget || wi instanceof HandDrawLayerWidget || wi instanceof BoxLayerWidget) {
+                    if (isLayerWidget(wi)) {
                         insertIndex = i + 1;
                     } else {
                         break;
@@ -581,20 +576,7 @@ export function getLayerWidgetClasses() {
  * @param {Object} widget - The widget to check
  * @returns {boolean} True if widget is a layer widget
  */
-export function isLayerWidget(widget) {
-    if (!widget) return false;
-
-    // Import layer classes (using dynamic import to avoid circular deps)
-    const { PowerSplineWidget } = require('./layer_type_spline.js');
-    const { HandDrawLayerWidget } = require('./layer_type_draw.js');
-    const { BoxLayerWidget } = require('./layer_type_box.js');
-
-    return (
-        widget instanceof PowerSplineWidget ||
-        widget instanceof HandDrawLayerWidget ||
-        widget instanceof BoxLayerWidget
-    );
-}
+export { isLayerWidget } from './layer_widget_identity.js';
 
 /**
  * Get the type name of a layer widget
@@ -603,15 +585,6 @@ export function isLayerWidget(widget) {
  * @returns {string|null} The type name ('spline', 'handdraw', 'box') or null
  */
 export function getLayerWidgetType(widget) {
-    if (!widget) return null;
-
-    const { PowerSplineWidget } = require('./layer_type_spline.js');
-    const { HandDrawLayerWidget } = require('./layer_type_draw.js');
-    const { BoxLayerWidget } = require('./layer_type_box.js');
-
-    if (widget instanceof HandDrawLayerWidget) return 'handdraw';
-    if (widget instanceof BoxLayerWidget) return 'box';
-    if (widget instanceof PowerSplineWidget) return 'spline';
-
-    return null;
+    const type = getLayerWidgetValueType(widget);
+    return type === 'box_layer' ? 'box' : type;
 }
