@@ -38,6 +38,7 @@ from .nodes.text import *
 from .nodes.h3_text import *
 from .nodes.h3_masked_guide import *
 from .nodes.power_crop_image import *
+from .nodes.samplers_experimental import *
 
 
 # Import API endpoints to register routes

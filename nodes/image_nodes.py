@@ -342,6 +342,13 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       grid canvas is sized to hit high_MP directly (cells are resized from the
       full-resolution source in a single pass, preserving per-cell quality).
       resize_to_32 / low_MP are applied after the grid.
+    - fill_black: only used when a grid is enabled. When true, every grid cell
+      except the main (masked, horizontal/vertical selected) one is filled with
+      black instead of holding sampled frames - each output frame shows only
+      the current source frame in the main cell on a black canvas. The other
+      cells are never sampled or resized (skipped for speed). image_low (and
+      its mask) inherit this automatically since they are derived from the
+      main output.
     """
     NODE_NAME = "Image Blend GPU Advanced"
 
@@ -372,6 +379,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 "opacity": ("INT", {"default": 100, "min": 0, "max": 100, "step": 1}),
                 "resize_to_32": ("BOOLEAN", {"default": False}),
                 "scale_method": (cls.RESIZE_ALGOS, {"default": "lanczos"}),
+                "fill_black": ("BOOLEAN", {"default": False}),
                 "mask_inner_erode": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 1}),
                 "high_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
                 "low_MP": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.01}),
@@ -478,6 +486,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                                  blend_mode="normal", blend_corner="none",
                                  opacity=100, layer_mask=None,
                                  resize_to_32=False, scale_method="lanczos",
+                                 fill_black=False,
                                  mask_inner_erode=0,
                                  high_MP=0.0, low_MP=0.0,
                                  enable_grid=None):
@@ -503,7 +512,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             output_bhwc = torch.clamp(bg_bhwc, 0.0, 1.0)
             output_mask = torch.zeros((b_frames, bg_h, bg_w), dtype=torch.float32, device=device)
             return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
-                                           resize_to_32, scale_method,
+                                           resize_to_32, scale_method, fill_black,
                                            mask_inner_erode,
                                            high_MP, low_MP)
 
@@ -629,12 +638,13 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
         # --- Optional grid, then shared post-processing: high_MP / resize_to_32 / mask_inner_erode / low_MP ---
         return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
-                                       resize_to_32, scale_method,
+                                       resize_to_32, scale_method, fill_black,
                                        mask_inner_erode,
                                        high_MP, low_MP)
 
     def _grid_and_finalize(self, output_bhwc, output_mask, enable_grid,
-                           resize_to_32, scale_method, mask_inner_erode,
+                           resize_to_32, scale_method, fill_black,
+                           mask_inner_erode,
                            high_MP, low_MP):
         """Apply the optional grid (from the Image Blend Grid node), then
         run the shared high_MP / resize_to_32 / mask_inner_erode / low_MP
@@ -644,7 +654,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             # cell resize), so pass high_MP=0.0 to _finalize_output to avoid a
             # redundant (and rounding-noisy) second resize of the canvas.
             output_bhwc, output_mask = self._build_grid(output_bhwc, output_mask, enable_grid,
-                                                        scale_method, high_MP)
+                                                        scale_method, high_MP, fill_black)
             high_MP = 0.0
         return self._finalize_output(output_bhwc, output_mask,
                                      resize_to_32, scale_method,
@@ -652,7 +662,7 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                                      high_MP, low_MP)
 
     def _build_grid(self, output_bhwc, output_mask, grid_cfg, scale_method="lanczos",
-                    high_MP=0.0):
+                    high_MP=0.0, fill_black=False):
         """
         Build a single-frame image grid (e.g. 3x2 / 3x3) from the output frames.
 
@@ -672,6 +682,10 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         - The returned mask is white only inside the cell selected by
           horizontal + vertical (e.g. left/top -> top-left cell), black
           elsewhere, with one frame per output frame.
+        - fill_black: instead of sampling frames into every cell, the canvas
+          is black except for the main (selected) cell, which holds the
+          current source frame. The other cells are never sampled or resized
+          (the whole sliding-window build is skipped).
         """
         layout = str(grid_cfg.get("enable", "false")).lower()
         horizontal = str(grid_cfg.get("horizontal", "left")).lower()
@@ -716,31 +730,43 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         src = self._pad_batch_to(output_bhwc, frames)
         n_src = src.shape[0]
 
-        # --- Build one grid per output frame (sliding storyboard):
-        #     frame t's cells are evenly sampled over [t .. frames-1],
-        #     so the first cell is always the current frame and the window
-        #     slides forward until the last frame fills every cell ---
-        device = src.device
-        t_range = torch.arange(frames, device=device).unsqueeze(1)            # (F, 1)
-        base = torch.linspace(0, frames - 1, n_cells, device=device).unsqueeze(0)  # (1, C)
-        idx = (base + t_range).clamp(max=frames - 1).long()                   # (F, C)
-        sampled = src[idx]                                                    # (F, C, H, W, Ch)
-        sampled = sampled.reshape(frames * n_cells, src_h, src_w, sampled.shape[-1])
-        cells = self._resize_bhwc(sampled, cell_h, cell_w, scale_method)
-        cells = cells.reshape(frames, rows, cols, cell_h, cell_w, -1)
-        canvas = cells.permute(0, 1, 3, 2, 4, 5).reshape(frames, canvas_h, canvas_w, -1)
-
-        # --- Mask only the cell selected by horizontal + vertical ---
+        # --- Main cell selected by horizontal + vertical ---
         # (e.g. left/top -> top-left cell; middle maps to the centre column/row,
         #  or the last of two when there is no true middle)
         col_idx = {"left": 0, "middle": cols // 2, "right": cols - 1}.get(horizontal, 0)
         row_idx = {"top": 0, "middle": rows // 2, "bottom": rows - 1}.get(vertical, 0)
         my, mx = row_idx * cell_h, col_idx * cell_w
+
+        device = src.device
+        if fill_black:
+            # --- Black canvas with only the main cell filled: each output
+            #     frame shows the current source frame in the main cell.
+            #     The other cells are never sampled or resized (skipped). ---
+            canvas = torch.zeros((frames, canvas_h, canvas_w, src.shape[-1]),
+                                 dtype=torch.float32, device=device)
+            main_cells = self._resize_bhwc(src, cell_h, cell_w, scale_method)
+            canvas[:, my:my + cell_h, mx:mx + cell_w, :] = main_cells
+        else:
+            # --- Build one grid per output frame (sliding storyboard):
+            #     frame t's cells are evenly sampled over [t .. frames-1],
+            #     so the first cell is always the current frame and the window
+            #     slides forward until the last frame fills every cell ---
+            t_range = torch.arange(frames, device=device).unsqueeze(1)            # (F, 1)
+            base = torch.linspace(0, frames - 1, n_cells, device=device).unsqueeze(0)  # (1, C)
+            idx = (base + t_range).clamp(max=frames - 1).long()                   # (F, C)
+            sampled = src[idx]                                                    # (F, C, H, W, Ch)
+            sampled = sampled.reshape(frames * n_cells, src_h, src_w, sampled.shape[-1])
+            cells = self._resize_bhwc(sampled, cell_h, cell_w, scale_method)
+            cells = cells.reshape(frames, rows, cols, cell_h, cell_w, -1)
+            canvas = cells.permute(0, 1, 3, 2, 4, 5).reshape(frames, canvas_h, canvas_w, -1)
+
+        # --- Mask only the cell selected by horizontal + vertical ---
         grid_mask = torch.zeros((1, canvas_h, canvas_w), dtype=torch.float32, device=device)
         grid_mask[0, my:my + cell_h, mx:mx + cell_w] = 1.0
         grid_mask = grid_mask.repeat(frames, 1, 1)
 
-        print(f"[INFO] Grid '{layout}': sliding per-frame grid, {n_cells} cells of "
+        print(f"[INFO] Grid '{layout}': {'black canvas + main cell only (fill_black)' if fill_black else 'sliding per-frame grid'}, "
+              f"{n_cells} cells of "
               f"{cell_w}x{cell_h} on a {canvas_w}x{canvas_h} canvas "
               f"(~{canvas_w * canvas_h / 1_000_000.0:.2f} MP"
               f"{f', target {high_MP} MP' if high_MP > 0.0 else ', legacy sizing - set high_MP to control quality'}"
