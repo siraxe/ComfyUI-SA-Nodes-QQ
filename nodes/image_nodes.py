@@ -293,7 +293,7 @@ class ImageBlendGrid:
                 "enable": (cls.GRID_LAYOUTS, {"default": "false"}),
                 "horizontal": (["left", "middle", "right"], {"default": "left"}),
                 "vertical": (["top", "middle", "bottom"], {"default": "top"}),
-                "frames": ("INT", {"default": 22, "min": 5, "max": 1000000, "step": 17}),
+                "frames": ("INT", {"default": 22, "min": 1, "max": 1000000, "step": 4}),
             }
         }
 
