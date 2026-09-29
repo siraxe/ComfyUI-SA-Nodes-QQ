@@ -542,7 +542,7 @@ export async function handleFramesRefresh(node) {
 
 
 export class TopRowWidget extends RgthreeBaseWidget {
-  constructor(name = "TopRowWidget", visibility = {}, handlers = {}) {
+  constructor(name = "TopRowWidget", controlsVisibility = {}, handlers = {}) {
     super(name);
     this.type = "custom";
     this.options = { serialize: false };
@@ -550,14 +550,14 @@ export class TopRowWidget extends RgthreeBaseWidget {
     this.haveMouseMovedValue = false;
     this.canvasButtonMouseDown = false;
     this.framesButtonMouseDown = false;
-    this.visibility = {
+    this.controlsVisibility = {
       refreshCanvasButton: true,
       refreshFramesButton: true,
       bgOpacityControl: true,
       animToggleButton: true,
       widthControl: true,
       heightControl: true,
-      ...visibility,
+      ...controlsVisibility,
     };
     // Store custom handlers
     this.handlers = {
@@ -628,7 +628,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     let posX = startX;
 
     // Draw Refresh Canvas button
-    if (this.visibility.refreshCanvasButton) {
+    if (this.controlsVisibility.refreshCanvasButton) {
       drawWidgetButton(
         ctx,
         { size: [refreshCanvasWidth, height], pos: [posX, posY] },
@@ -640,7 +640,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     posX += refreshCanvasWidth + spacing;
 
     // Draw Refresh Frames button
-    if (this.visibility.refreshFramesButton) {
+    if (this.controlsVisibility.refreshFramesButton) {
       // Get current max frames for display
       const currentMaxFrames = node.editor?._getMaxFrames?.() ?? node.properties?.box_max_frames ?? '?';
       const framesLabel = `🕞 ${currentMaxFrames}`;
@@ -657,7 +657,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     // Draw bg_opacity control
     const bgOpacityLabelWidth = 30;
 
-    if (this.visibility.bgOpacityControl) {
+    if (this.controlsVisibility.bgOpacityControl) {
       // Draw background
       ctx.fillStyle = LiteGraph.WIDGET_BGCOLOR;
       ctx.fillRect(posX, posY, bgOpacityControlWidth, height);
@@ -678,7 +678,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
       height,
       value: bgOpacityValue,
       direction: 1,
-      textColor: this.visibility.bgOpacityControl ? undefined : "transparent",
+      textColor: this.controlsVisibility.bgOpacityControl ? undefined : "transparent",
     });
 
     assignBounds("bgOpacityDec", bgOpLeftArrow);
@@ -689,7 +689,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
 
     // Animation toggle icon
     const isAnimOn = !!(node?.editor?._inactiveFlowEnabled ?? false);
-    if (this.visibility.animToggleButton) {
+    if (this.controlsVisibility.animToggleButton) {
       drawWidgetButton(
         ctx,
         { size: [iconButtonWidth, height], pos: [posX, posY] },
@@ -746,7 +746,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     const widthLabel = "width:";
     const widthControlX = controlsStartX;
 
-    if (this.visibility.widthControl) {
+    if (this.controlsVisibility.widthControl) {
       ctx.textBaseline = "middle";
       ctx.textAlign = "left";
       ctx.fillStyle = LiteGraph.WIDGET_TEXT_COLOR;
@@ -760,14 +760,14 @@ export class TopRowWidget extends RgthreeBaseWidget {
       height,
       value: widthValue,
       direction: 1,
-      textColor: this.visibility.widthControl ? undefined : "transparent",
+      textColor: this.controlsVisibility.widthControl ? undefined : "transparent",
     });
 
     assignBounds("widthDec", wLeftArrow);
     assignBounds("widthVal", wText);
     assignBounds("widthInc", wRightArrow);
     assignBounds("widthAny", [wLeftArrow[0], wRightArrow[0] + wRightArrow[1] - wLeftArrow[0]]);
-    if (this.visibility.widthControl) {
+    if (this.controlsVisibility.widthControl) {
       this.hitAreas.widthDec.onClick = () => this.stepWidth(node, -16);
       this.hitAreas.widthInc.onClick = () => this.stepWidth(node, 16);
       this.hitAreas.widthVal.onClick = () => this.promptWidth(node);
@@ -778,7 +778,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     const heightControlX = widthControlStartX + numberControlWidth + controlSpacing;
     const heightLabel = "height:";
 
-    if (this.visibility.heightControl) {
+    if (this.controlsVisibility.heightControl) {
       ctx.textBaseline = "middle";
       ctx.fillText(heightLabel, heightControlX, midY);
     }
@@ -790,14 +790,14 @@ export class TopRowWidget extends RgthreeBaseWidget {
       height,
       value: heightValue,
       direction: 1,
-      textColor: this.visibility.heightControl ? undefined : "transparent",
+      textColor: this.controlsVisibility.heightControl ? undefined : "transparent",
     });
 
     assignBounds("heightDec", hLeftArrow);
     assignBounds("heightVal", hText);
     assignBounds("heightInc", hRightArrow);
     assignBounds("heightAny", [hLeftArrow[0], hRightArrow[0] + hRightArrow[1] - hLeftArrow[0]]);
-    if (this.visibility.heightControl) {
+    if (this.controlsVisibility.heightControl) {
       this.hitAreas.heightDec.onClick = () => this.stepHeight(node, -16);
       this.hitAreas.heightInc.onClick = () => this.stepHeight(node, 16);
       this.hitAreas.heightVal.onClick = () => this.promptHeight(node);
@@ -805,7 +805,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     }
 
     // Setup event handlers for refresh button
-    if (this.visibility.refreshCanvasButton) {
+    if (this.controlsVisibility.refreshCanvasButton) {
       this.hitAreas.refreshCanvasButton.onClick = async () => {
         if (this.handlers.onRefreshCanvas) {
           await this.handlers.onRefreshCanvas(node);
@@ -821,7 +821,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
       };
     }
 
-    if (this.visibility.refreshFramesButton) {
+    if (this.controlsVisibility.refreshFramesButton) {
       this.hitAreas.refreshFramesButton.onClick = async () => {
         if (this.handlers.onRefreshFrames) {
           await this.handlers.onRefreshFrames(node);
@@ -838,7 +838,7 @@ export class TopRowWidget extends RgthreeBaseWidget {
     }
 
     // Setup bg_opacity control handlers
-    if (this.visibility.bgOpacityControl) {
+    if (this.controlsVisibility.bgOpacityControl) {
       this.hitAreas.bgOpacityDec.onClick = () => this.stepBgOpacity(node, -5);
       this.hitAreas.bgOpacityInc.onClick = () => this.stepBgOpacity(node, 5);
       this.hitAreas.bgOpacityVal.onClick = () => this.promptBgOpacity(node);

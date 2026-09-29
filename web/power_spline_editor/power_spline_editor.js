@@ -10,7 +10,6 @@ import {
   create_documentation_stylesheet,
   RgthreeBaseWidget,
   DimensionsWidget,
-  PowerSplineWidget,
   PowerSplineHeaderWidget,
   NodeSizeManager,
   drawWidgetButton,
@@ -18,11 +17,8 @@ import {
   transformVideoToCanvasSpace
 } from './spline_utils.js';
 import { TopRowWidget, handleCanvasRefresh, handleFramesRefresh } from './canvas_top_row.js';
-import {
-  HandDrawLayerWidget,
-  commitHanddrawPath
-} from './layer_type_draw.js';
-import { BoxLayerWidget } from './layer_type_box.js';
+import { commitHanddrawPath } from './layer_type_draw.js';
+import { isLayerWidget } from './layer_widget_identity.js';
 import { chainCallback, hideWidgetForGood } from './general_utils.js';
 import { initializeLayerUI, SplineLayerManager } from './layer_ui_main_widget.js';
 import SplineEditor2 from './canvas/canvas_main.js';
@@ -405,33 +401,18 @@ app.registerExtension({
         this.hasSplineWidgets = function () {
           return (
             this.widgets &&
-            this.widgets.some(
-              w =>
-                w instanceof PowerSplineWidget ||
-                w instanceof HandDrawLayerWidget ||
-                w instanceof BoxLayerWidget
-            )
+            this.widgets.some(isLayerWidget)
           );
         };
 
         this.allSplinesState = function () {
-          const layerWidgets = this.widgets.filter(
-            w =>
-              w instanceof PowerSplineWidget ||
-              w instanceof HandDrawLayerWidget ||
-              w instanceof BoxLayerWidget
-          );
+          const layerWidgets = this.widgets.filter(isLayerWidget);
           if (!layerWidgets.length) return false;
           return layerWidgets.every(w => w.value.on);
         };
 
         this.toggleAllSplines = function () {
-          const layerWidgets = this.widgets.filter(
-            w =>
-              w instanceof PowerSplineWidget ||
-              w instanceof HandDrawLayerWidget ||
-              w instanceof BoxLayerWidget
-          );
+          const layerWidgets = this.widgets.filter(isLayerWidget);
           const newState = !this.allSplinesState();
           layerWidgets.forEach(w => (w.value.on = newState));
           this.setDirtyCanvas(true, true);
@@ -726,12 +707,7 @@ app.registerExtension({
             const scaleX = canvasWidth / oldWidth;
             const scaleY = canvasHeight / oldHeight;
 
-            const splineWidgets = this.widgets?.filter(
-              w =>
-                w instanceof PowerSplineWidget ||
-                w instanceof HandDrawLayerWidget ||
-                w instanceof BoxLayerWidget
-            );
+            const splineWidgets = this.widgets?.filter(isLayerWidget);
 
             splineWidgets?.forEach(widget => {
               if (widget.value.points_store) {
@@ -1101,12 +1077,7 @@ app.registerExtension({
       nodeType.prototype.onSerialize = function (o) {
         const coordinatesWidget = this.widgets.find(w => w.name === 'coordinates');
         if (coordinatesWidget) {
-          const splineWidgets = this.widgets.filter(
-            w =>
-              w instanceof PowerSplineWidget ||
-              w instanceof HandDrawLayerWidget ||
-              w instanceof BoxLayerWidget
-          );
+          const splineWidgets = this.widgets.filter(isLayerWidget);
           const values = splineWidgets
             .map(w => w.value)
             .filter(v => v);

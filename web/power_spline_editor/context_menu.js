@@ -1,8 +1,6 @@
 import { app } from '../../../scripts/app.js';
-import { PowerSplineWidget } from './spline_utils.js';
-import { HandDrawLayerWidget } from './layer_type_draw.js';
-import { BoxLayerWidget } from './layer_type_box.js';
 import { updateDrivenConfigValue, updateEasingConfigValue } from './persistence.js';
+import { getLayerWidgetType, isLayerWidget } from './layer_widget_identity.js';
 
 // Helper to create interactive number input with arrows and drag support
 // For driven config (syncs to both driven and _drivenConfig)
@@ -820,9 +818,7 @@ export function getSlotInPosition(canvasX, canvasY) {
             if (canvasY >= widgetTop && canvasY <= widgetBottom) {
                 // Found the widget at this position
                 const isSplineLike =
-                    (widget instanceof PowerSplineWidget) ||
-                    (widget instanceof HandDrawLayerWidget) ||
-                    (widget instanceof BoxLayerWidget) ||
+                    isLayerWidget(widget) ||
                     widget.name?.startsWith("spline_") ||
                     widget.name?.startsWith("box_");
                 if (isSplineLike) {
@@ -901,14 +897,12 @@ export function showCustomLayerMenu(event, widget, node, position) {
     `;
 
     const splineWidgets = node.widgets.filter(w =>
-        (w instanceof PowerSplineWidget) ||
-        (w instanceof HandDrawLayerWidget) ||
-        (w instanceof BoxLayerWidget) ||
+        isLayerWidget(w) ||
         w.name?.startsWith("spline_") ||
         w.name?.startsWith("box_")
     );
     const splineIndex = splineWidgets.indexOf(widget);
-    const isBoxLayerWidget = (widget instanceof BoxLayerWidget) || widget.name?.startsWith("box_");
+    const isBoxLayerWidget = getLayerWidgetType(widget) === 'box_layer' || widget.name?.startsWith("box_");
     const canMoveUp = splineIndex > 0;
     const canMoveDown = splineIndex < splineWidgets.length - 1;
 
@@ -1198,14 +1192,12 @@ export function getSlotMenuOptions(slot, event) {
 
     // Check if the slot is for a spline widget (layer right-click)
     const widget = slot?.widget;
-    const isLayerWidget = widget &&
-        ((widget instanceof PowerSplineWidget) ||
-            (widget instanceof HandDrawLayerWidget) ||
-            (widget instanceof BoxLayerWidget) ||
+    const isLayer = widget &&
+        (isLayerWidget(widget) ||
             widget.name?.startsWith("spline_") ||
             widget.name?.startsWith("box_"));
 
-    if (isLayerWidget) {
+    if (isLayer) {
         const canvas = app.canvas;
 
         // Try multiple ways to get the screen position
