@@ -266,7 +266,9 @@ class ImageBlendGrid:
     When 'enable' is not "false", that node builds an image grid out of the
     background frames:
 
-    - enable "2x2" -> 2 columns x 2 rows (4 cells), "3x2" -> 6 cells,
+    - enable "2x1" -> 2 columns x 1 row (2 cells side by side),
+      "1x2" -> 1 column x 2 rows (2 cells stacked),
+      "2x2" -> 2 columns x 2 rows (4 cells), "3x2" -> 6 cells,
       "3x3" -> 9 cells.
     - The background video length is normalized to 'frames': the last frame
       is duplicated if the video is shorter, extra frames are dropped if it
@@ -284,7 +286,7 @@ class ImageBlendGrid:
     """
     NODE_NAME = "Image Blend Grid"
 
-    GRID_LAYOUTS = ["false", "2x2", "3x2", "3x3"]
+    GRID_LAYOUTS = ["false", "2x1", "1x2", "2x2", "3x2", "3x3"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -293,7 +295,7 @@ class ImageBlendGrid:
                 "enable": (cls.GRID_LAYOUTS, {"default": "false"}),
                 "horizontal": (["left", "middle", "right"], {"default": "left"}),
                 "vertical": (["top", "middle", "bottom"], {"default": "top"}),
-                "frames": ("INT", {"default": 22, "min": 1, "max": 1000000, "step": 4}),
+                "frames": ("INT", {"default": 22, "min": 1, "max": 1000000, "step": 1}),
             }
         }
 
@@ -326,8 +328,10 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       concat_up / concat_down: same, but the layer is resized to the background
       width and stacked on top / below the background.
     - resize_to_32: center-crop the final output so width/height are divisible by 32.
-    - mask_inner_erode: if > 0, erode the mask output inwards from its edges by that
-      many pixels (applied after resize_to_32; the image is not affected).
+    - mask_inner_erode: if > 0, erode the mask output inwards by that
+      many pixels, but only from the right and bottom sides of the image
+      (the mask stays flush against the top and left borders; applied after
+      resize_to_32; the image is not affected).
     - high_MP: if > 0, proportionally scale the main output (up or down) to the
       given megapixels before resize_to_32 is applied.
     - low_MP: if > 0, proportionally scale the (already high_MP-scaled) output
@@ -511,10 +515,12 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             print("[INFO] No layer_image connected, processing background only.")
             output_bhwc = torch.clamp(bg_bhwc, 0.0, 1.0)
             output_mask = torch.zeros((b_frames, bg_h, bg_w), dtype=torch.float32, device=device)
+            # No blend phase: bar only covers the grid/post/download phases
+            pbar = comfy.utils.ProgressBar(5)
             return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
                                            resize_to_32, scale_method, fill_black,
                                            mask_inner_erode,
-                                           high_MP, low_MP)
+                                           high_MP, low_MP, pbar=pbar)
 
         layer_bhwc = layer_image.to(device, dtype=torch.float32)
 
@@ -565,17 +571,37 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
         blend_mode = blend_mode.lower()
 
+        # Single continuous progress bar (same mechanism Power Load Video
+        # uses), total estimated UP FRONT so it only moves forward 0 -> 100:
+        #   blend phase: 1 unit per output frame
+        #   fixed phases: grid (1) + high_MP (1) + erode (1) + low_MP (1) + CPU download (1)
+        pbar = comfy.utils.ProgressBar(max_frames + 5)
+
         if blend_corner == "none":
             # --- Original behaviour: resize layer (and mask) to cover background ---
             if layer_bhwc.shape[1:3] != (bg_h, bg_w):
+                comfy.model_management.throw_exception_if_processing_interrupted()
                 layer_bhwc = self._resize_bhwc(layer_bhwc, bg_h, bg_w, scale_method)
                 effective_mask_layer = self._resize_bhwc(effective_mask_layer, bg_h, bg_w, scale_method)
 
-            blended = self._get_blended(bg_bhwc, layer_bhwc, blend_mode)
-
-            output_bhwc = bg_bhwc * (1.0 - effective_mask_layer) + blended * effective_mask_layer
-            output_bhwc = torch.clamp(output_bhwc, 0.0, 1.0)
-            output_mask = effective_mask_layer.squeeze(-1).clamp(0.0, 1.0)
+            # Blend + composite in frame chunks so progress updates land
+            # continuously and Stop stays responsive on large batches
+            # (all blend modes are elementwise per-frame ops, so chunking
+            # the batch is mathematically identical to one big call).
+            out_chunks = []
+            mask_chunks = []
+            chunk = max(1, min(8, max_frames))
+            for i in range(0, max_frames, chunk):
+                comfy.model_management.throw_exception_if_processing_interrupted()
+                bg_c = bg_bhwc[i:i + chunk]
+                mask_c = effective_mask_layer[i:i + chunk]
+                blended_c = self._get_blended(bg_c, layer_bhwc[i:i + chunk], blend_mode)
+                out_c = torch.clamp(bg_c * (1.0 - mask_c) + blended_c * mask_c, 0.0, 1.0)
+                out_chunks.append(out_c)
+                mask_chunks.append(mask_c.squeeze(-1).clamp(0.0, 1.0))
+                pbar.update(out_c.shape[0])
+            output_bhwc = torch.cat(out_chunks, dim=0)
+            output_mask = torch.cat(mask_chunks, dim=0)
 
         elif blend_corner in ("concat_left", "concat_right", "concat_up", "concat_down"):
             # --- Concat mode: resize the layer to match the background along the
@@ -603,6 +629,9 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
             output_bhwc = torch.clamp(torch.cat(image_parts, dim=cat_dim), 0.0, 1.0)
             output_mask = torch.cat(mask_parts, dim=cat_dim)
+            # Concat is a single cheap op: credit the whole blend phase at once
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            pbar.update(max_frames)
 
         else:
             # --- Corner snap mode: layer keeps its own size, snapped to a bg corner ---
@@ -626,12 +655,16 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
             bg_region = bg_bhwc[:, y0:y0 + crop_h, x0:x0 + crop_w, :]
 
-            blended = self._get_blended(bg_region, layer_crop, blend_mode)
-
-            composited = bg_region * (1.0 - mask_crop) + blended * mask_crop
-
+            # Chunked blend + composite (same reasoning as the "none" branch)
             output_bhwc = bg_bhwc.clone()
-            output_bhwc[:, y0:y0 + crop_h, x0:x0 + crop_w, :] = composited
+            chunk = max(1, min(8, max_frames))
+            for i in range(0, max_frames, chunk):
+                comfy.model_management.throw_exception_if_processing_interrupted()
+                bg_c = bg_bhwc[i:i + chunk, y0:y0 + crop_h, x0:x0 + crop_w, :]
+                blended_c = self._get_blended(bg_c, layer_crop[i:i + chunk], blend_mode)
+                composited_c = bg_c * (1.0 - mask_crop[i:i + chunk]) + blended_c * mask_crop[i:i + chunk]
+                output_bhwc[i:i + chunk, y0:y0 + crop_h, x0:x0 + crop_w, :] = composited_c
+                pbar.update(min(chunk, max_frames - i))
             output_bhwc = torch.clamp(output_bhwc, 0.0, 1.0)
 
             output_mask[:, y0:y0 + crop_h, x0:x0 + crop_w] = mask_crop.squeeze(-1).clamp(0.0, 1.0)
@@ -640,12 +673,12 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         return self._grid_and_finalize(output_bhwc, output_mask, enable_grid,
                                        resize_to_32, scale_method, fill_black,
                                        mask_inner_erode,
-                                       high_MP, low_MP)
+                                       high_MP, low_MP, pbar=pbar)
 
     def _grid_and_finalize(self, output_bhwc, output_mask, enable_grid,
                            resize_to_32, scale_method, fill_black,
                            mask_inner_erode,
-                           high_MP, low_MP):
+                           high_MP, low_MP, pbar=None):
         """Apply the optional grid (from the Image Blend Grid node), then
         run the shared high_MP / resize_to_32 / mask_inner_erode / low_MP
         post-processing."""
@@ -656,10 +689,15 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             output_bhwc, output_mask = self._build_grid(output_bhwc, output_mask, enable_grid,
                                                         scale_method, high_MP, fill_black)
             high_MP = 0.0
+        # Grid phase checkpoint (always credited, even when no grid is used,
+        # so the bar stays monotonic towards its up-front total)
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        if pbar is not None:
+            pbar.update(1)
         return self._finalize_output(output_bhwc, output_mask,
                                      resize_to_32, scale_method,
                                      mask_inner_erode,
-                                     high_MP, low_MP)
+                                     high_MP, low_MP, pbar=pbar)
 
     def _build_grid(self, output_bhwc, output_mask, grid_cfg, scale_method="lanczos",
                     high_MP=0.0, fill_black=False):
@@ -779,22 +817,27 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
     @staticmethod
     def _erode_mask(mask_bhw, radius):
         """Exact morphological erosion (square structuring element) of a BHW
-        mask, shrinking white areas by `radius` pixels on every side.
+        mask, shrinking white areas by `radius` pixels - but only from the
+        right and bottom sides of the canvas; the mask stays flush against
+        the top and left borders.
 
         Implemented as a separable min-filter (horizontal + vertical pass)
         instead of one large square kernel, which is much faster for big
-        radii, and padded with mask=0 so edges touching the canvas border
-        are eroded too."""
+        radii. The padding is asymmetric: outside the canvas counts as white
+        (inv=0) on the top/left so those borders are not eroded, and as
+        black (inv=1) on the right/bottom so the mask erodes inwards there."""
         k = 2 * radius + 1
         inv = 1.0 - mask_bhw.unsqueeze(1)  # B,1,H,W
-        inv = F.pad(inv, (radius,) * 4, mode='constant', value=1.0)
+        # F.pad order for the last two dims: (W_left, W_right, H_top, H_bottom)
+        inv = F.pad(inv, (0, radius, 0, radius), mode='constant', value=1.0)  # right/bottom: outside = black -> erode
+        inv = F.pad(inv, (radius, 0, radius, 0), mode='constant', value=0.0)  # left/top: outside = white -> keep
         inv = F.max_pool2d(inv, kernel_size=(1, k), stride=1)  # horizontal pass
         inv = F.max_pool2d(inv, kernel_size=(k, 1), stride=1)  # vertical pass
         return (1.0 - inv).squeeze(1)
 
     def _finalize_output(self, output_bhwc, output_mask,
                          resize_to_32, scale_method, mask_inner_erode,
-                         high_MP, low_MP):
+                         high_MP, low_MP, pbar=None):
         """Apply high_MP scaling, resize_to_32 cropping, mask_inner_erode mask
         erosion and the low_MP copy to a composited (image, mask) pair and
         build the return tuple. All resizes use the selected scale_method."""
@@ -810,6 +853,10 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 output_mask = self._resize_bhwc(output_mask.unsqueeze(-1), high_h, high_w, scale_method).squeeze(-1)
                 print(f"[INFO] high_MP: scaled output {src_w}x{src_h} -> "
                       f"{high_w}x{high_h} ({high_MP} MP).")
+        # high_MP phase checkpoint (credited even when skipped)
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        if pbar is not None:
+            pbar.update(1)
 
         # --- Optional: center-crop output so width/height are divisible by 32 ---
         if resize_to_32:
@@ -821,9 +868,9 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                       f"{output_bhwc.shape[2]}x{output_bhwc.shape[1]}.")
             output_mask = output_mask_4d.squeeze(-1)
 
-        # --- Optional: erode the mask inwards from its edges (inner feather).
-        #     The image is not affected; the mask shrinks by mask_inner_erode
-        #     pixels on every side of its selected area. ---
+        # --- Optional: erode the mask inwards (inner feather), but only from
+        #     the right and bottom sides of the image; the top/left borders
+        #     are kept. The image is not affected. ---
         if mask_inner_erode > 0:
             # Skip duplicate frames (e.g. grid masks are `frames` identical
             # copies): erode one and repeat it back.
@@ -831,9 +878,24 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 single = self._erode_mask(output_mask[:1], mask_inner_erode)
                 output_mask = single.repeat(output_mask.shape[0], 1, 1)
             else:
-                output_mask = self._erode_mask(output_mask, mask_inner_erode)
+                # Per-frame masks differ, so each frame must be eroded
+                # individually - but still as ONE batched max_pool2d pass.
+                # CPU max_pool2d with large kernels is very slow for many
+                # frames, so temporarily run it on the GPU when available.
+                if (output_mask.shape[0] > 1 and not output_mask.is_cuda
+                        and torch.cuda.is_available()):
+                    gpu_device = comfy.model_management.intermediate_device()
+                    output_mask = self._erode_mask(
+                        output_mask.to(gpu_device), mask_inner_erode
+                    ).to(output_mask.device)
+                else:
+                    output_mask = self._erode_mask(output_mask, mask_inner_erode)
             print(f"[INFO] mask_inner_erode: eroded mask {mask_inner_erode}px inwards "
-                  f"from its edges.")
+                  f"from the right/bottom sides (top/left borders kept).")
+        # resize_to_32 + erode phase checkpoint (credited even when skipped)
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        if pbar is not None:
+            pbar.update(1)
 
         # --- Optional low-megapixel copy of the output (image_low / mask_low) ---
         if low_MP > 0.0:
@@ -859,8 +921,18 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             image_low = output_bhwc
             mask_low = output_mask.unsqueeze(-1)
 
-        return (output_bhwc.cpu(), output_mask.cpu(),
-                image_low.cpu(), mask_low.squeeze(-1).cpu())
+        # low_MP phase checkpoint (credited even when skipped)
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        if pbar is not None:
+            pbar.update(1)
+
+        # CPU download phase: last unit of the bar
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        result = (output_bhwc.cpu(), output_mask.cpu(),
+                  image_low.cpu(), mask_low.squeeze(-1).cpu())
+        if pbar is not None:
+            pbar.update(1)
+        return result
 
     def _get_blended(self, background, layer, blend_mode):
         """Dispatch to the inherited blend_* functions."""

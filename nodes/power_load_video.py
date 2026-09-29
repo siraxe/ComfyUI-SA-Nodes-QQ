@@ -16,6 +16,16 @@ import folder_paths
 import comfy.model_management
 from comfy.utils import ProgressBar
 
+# PyAV decodes through ffmpeg, so it honours the video's colour tags (bt709
+# vs bt601, tv/pc range). OpenCV's FFmpeg backend always converts YUV -> RGB
+# with the bt601 matrix, which visibly shifts the colours of bt709 sources
+# (i.e. nearly all HD video) - measured up to 23/255 on saturated reds. PyAV
+# is therefore preferred; OpenCV stays as a fallback if PyAV is unavailable.
+try:
+    import av
+except Exception:  # pragma: no cover - optional dependency
+    av = None
+
 
 def _abort_if_interrupted():
     """Raise ComfyUI's InterruptProcessingException when the user stopped the run.
@@ -94,13 +104,20 @@ def _snap32(v):
 
 def _resolve_target_size(target_w, target_h, cur_w, cur_h):
     """Fill in a missing side proportionally from the current aspect ratio,
-    then snap both sides to dimensions divisible by 32."""
+    then snap both sides to dimensions divisible by 32.
+
+    A request that already resolves to the current size is returned untouched:
+    it is satisfied as-is, and snapping it (e.g. 1080 -> 1088) would force a
+    pointless resample + center-crop of an otherwise untouched video.
+    """
     if target_w > 0 and target_h > 0:
         pass
     elif target_w > 0:
         target_h = int(round(target_w * cur_h / cur_w))
     else:
         target_w = int(round(target_h * cur_w / cur_h))
+    if target_w == cur_w and target_h == cur_h:
+        return target_w, target_h
     return _snap32(target_w), _snap32(target_h)
 
 
@@ -157,6 +174,50 @@ def _lanczos_stretch(tensor, target_w, target_h):
     t = tensor.permute(0, 3, 1, 2)
     t = _lanczos_scale(t, (target_h, target_w))
     return t.permute(0, 2, 3, 1).contiguous()
+
+
+# ffmpeg channel-layout names whose channel count cannot be derived from the
+# name itself. "5.1" / "7.1(side)" / "2.1" style layouts are handled
+# numerically, and unknown layouts come back as "N channels".
+_LAYOUT_CHANNELS = {
+    "mono": 1,
+    "stereo": 2,
+    "quad": 4,
+    "quad(side)": 4,
+    "hexagonal": 6,
+    "octagonal": 8,
+    "hexadecagonal": 16,
+    "downmix": 2,
+}
+
+
+def _layout_channel_count(layout):
+    """Channel count of an ffmpeg channel-layout name (0 = unknown)."""
+    name = (layout or "").strip().lower()
+    if name in _LAYOUT_CHANNELS:
+        return _LAYOUT_CHANNELS[name]
+    match = re.match(r"^(\d+)\s*channels?$", name)  # "6 channels" (unknown layout)
+    if match:
+        return int(match.group(1))
+    match = re.match(r"^(\d+)\.(\d+)", name)  # 2.1, 5.1, 5.1(side), 7.1(wide) ...
+    if match:
+        return int(match.group(1)) + int(match.group(2))
+    return 0
+
+
+def _parse_audio_props(log):
+    """(sample_rate, channels) of the first audio stream in ffmpeg's log.
+
+    Falls back to (0, 0) when the stream line cannot be parsed, so the caller
+    can decide what to do instead of silently guessing stereo/44.1 kHz.
+    """
+    for line in log.splitlines():
+        if ": Audio: " not in line:
+            continue
+        match = re.search(r"(\d+) Hz,\s*([^,]+),", line)
+        if match:
+            return int(match.group(1)), _layout_channel_count(match.group(2))
+    return 0, 0
 
 
 def extract_audio(file_path, start_time=0, duration=0, pbar=None, pbar_base=0, pbar_units=0):
@@ -270,22 +331,167 @@ def extract_audio(file_path, start_time=0, duration=0, pbar=None, pbar_base=0, p
     try:
         audio = torch.frombuffer(bytearray(out), dtype=torch.float32)
         stderr_data = "".join(err_holder)
-        match = re.search(r', (\d+) Hz, (\w+), ', stderr_data)
     except Exception:
         return None
-
-    if match:
-        sample_rate = int(match.group(1))
-        ac = {"mono": 1, "stereo": 2}.get(match.group(2), 2)
-    else:
-        sample_rate = 44100
-        ac = 2
 
     if audio.numel() == 0:
         return None
 
-    audio = audio.reshape((-1, ac)).transpose(0, 1).unsqueeze(0)
+    # Keep the source's own sample rate and channel count (mono, stereo, 5.1,
+    # 7.1, ...) so multichannel audio survives instead of being reinterpreted
+    # as 44.1 kHz stereo, which garbles it.
+    sample_rate, channels = _parse_audio_props(stderr_data)
+    if sample_rate <= 0:
+        print("[SA-Nodes-QQ] Could not detect the audio sample rate; assuming 44100 Hz.")
+        sample_rate = 44100
+    if channels <= 0:
+        print("[SA-Nodes-QQ] Could not detect the audio channel layout; assuming 2 channels.")
+        channels = 2
+
+    # Drop a partial trailing frame (if any) so the reshape below cannot fail
+    usable = (audio.numel() // channels) * channels
+    if usable != audio.numel():
+        audio = audio[:usable]
+
+    audio = audio.reshape((-1, channels)).transpose(0, 1).unsqueeze(0)
     return {"waveform": audio, "sample_rate": sample_rate}
+
+
+_CV2_COLOR_WARNED = False
+
+
+class _PyAVSource:
+    """Video decoder backed by PyAV (i.e. ffmpeg), which honours the stream's
+    colour tags (bt709/bt601, tv/pc range) - unlike OpenCV's FFmpeg backend."""
+
+    def __init__(self, filename):
+        self.container = av.open(filename)
+        streams = self.container.streams.video
+        if not streams:
+            self.container.close()
+            raise ValueError("no video stream")
+        self.stream = streams[0]
+        try:
+            self.stream.thread_type = "AUTO"
+        except Exception:
+            pass
+
+        time_base = self.stream.time_base
+        self._time_base = float(time_base) if time_base else 0.0
+        # Timestamp of the first frame: seeking/skipping is relative to it, so
+        # files whose timeline does not start at 0 still map onto frame numbers.
+        self._start_time = 0.0
+        if self.stream.start_time is not None and self._time_base > 0:
+            self._start_time = float(self.stream.start_time) * self._time_base
+
+        native_fps = 0.0
+        for rate in (self.stream.average_rate, self.stream.guessed_rate):
+            try:
+                if rate:
+                    native_fps = float(rate)
+                    break
+            except (TypeError, ValueError):
+                continue
+        self.fps = native_fps if native_fps > 0 else 24.0
+
+        # Exact frame count when the container provides one (mp4/mov), else 0
+        # (= unknown); duration still lets the caller size its progress bar.
+        self.frame_count = max(0, int(self.stream.frames or 0))
+        self.duration = 0.0
+        if self.container.duration:
+            self.duration = float(self.container.duration) / av.time_base
+
+    def frames(self, first_idx, last_idx):
+        """Yield RGB uint8 frames for [first_idx, last_idx] (None = until EOF)."""
+        first_idx = first_idx or 0
+        target_time = self._start_time + first_idx / self.fps
+        if first_idx > 0 and target_time > 0:
+            # Seek to the preceding keyframe; the loop below drops everything
+            # that comes before the requested frame.
+            try:
+                self.container.seek(int(target_time * av.time_base), backward=True)
+            except Exception:
+                pass
+
+        want = None if last_idx is None else max(1, last_idx - first_idx + 1)
+        # Tolerate half a frame of timestamp jitter when deciding which frame
+        # is the first requested one.
+        tolerance = 0.5 / self.fps
+        skipping = first_idx > 0
+        got = 0
+        try:
+            for frame in self.container.decode(self.stream):
+                if skipping:
+                    timestamp = frame.time
+                    if timestamp is not None and timestamp < target_time - tolerance:
+                        continue
+                    skipping = False
+                yield frame.to_ndarray(format="rgb24")
+                got += 1
+                if want is not None and got >= want:
+                    break
+        except Exception:
+            # Truncated/corrupt tail: keep whatever was decoded so far (the
+            # OpenCV path behaved the same via ret == False).
+            return
+
+    def close(self):
+        try:
+            self.container.close()
+        except Exception:
+            pass
+
+
+class _CV2Source:
+    """Fallback decoder used when PyAV is not installed."""
+
+    def __init__(self, filename):
+        global _CV2_COLOR_WARNED
+        self.cap = cv2.VideoCapture(filename)
+        if not self.cap.isOpened():
+            raise ValueError(f"Could not open video file: {filename}")
+        self.frame_count = max(0, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        native_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.fps = native_fps if native_fps and native_fps > 0 else 24.0
+        self.duration = (self.frame_count / self.fps) if self.frame_count > 0 else 0.0
+        if not _CV2_COLOR_WARNED:
+            print("[SA-Nodes-QQ] PyAV ('av' package) is unavailable - falling back to OpenCV "
+                  "decoding, which ignores the video's colour tags and can shift colours "
+                  "(bt709 sources get decoded with the bt601 matrix).")
+            _CV2_COLOR_WARNED = True
+
+    def frames(self, first_idx, last_idx):
+        """Yield RGB uint8 frames for [first_idx, last_idx] (None = until EOF)."""
+        first_idx = first_idx or 0
+        if first_idx == 0 and (last_idx is None or last_idx >= self.frame_count - 1):
+            # Straight sequential read (no seeking)
+            while True:
+                ok, frame = self.cap.read()
+                if not ok:
+                    return
+                yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        else:
+            frame_idx = first_idx
+            while last_idx is None or frame_idx <= last_idx:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ok, frame = self.cap.read()
+                if not ok:
+                    return
+                yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_idx += 1
+
+    def close(self):
+        self.cap.release()
+
+
+def _open_video_source(filename):
+    """Open a video for decoding, preferring the colour-accurate PyAV path."""
+    if av is not None:
+        try:
+            return _PyAVSource(filename)
+        except Exception as exc:
+            print(f"[SA-Nodes-QQ] PyAV could not open {filename} ({exc}); trying OpenCV.")
+    return _CV2Source(filename)
 
 
 class PowerLoadVideo:
@@ -370,6 +576,9 @@ class PowerLoadVideo:
                      If provided and contains crop info, will apply the same crop to this video.
                      If the source was resized via width/height inputs (resized=True),
                      applies the same resize so outputs match dimensions.
+                     If it contains force_fps_override / max_fps_override (set by a
+                     ChainEditVideo node), those REPLACE this node's own UI
+                     force_fps / max_fps widget values.
             prompt/unique_id: Hidden inputs (raw prompt + node id) used only to
                      detect whether high_size is connected.
 
@@ -410,6 +619,17 @@ class PowerLoadVideo:
                 meta_high_size = _to_float(metadata.get("high_size", 0.0), 0.0)
                 meta_high_w = _to_int(metadata.get("high_width", 0), 0)
                 meta_high_h = _to_int(metadata.get("high_height", 0), 0)
+
+            # FPS overrides from a ChainEditVideo node: when present in the
+            # metadata they REPLACE this node's own UI force_fps / max_fps
+            # widgets. force_fps_override of 0 = native FPS; max_fps_override
+            # of 0 = disabled (no frame-count cap), matching the widget semantics.
+            if "force_fps_override" in metadata:
+                force_fps = _to_float(metadata.get("force_fps_override", 0.0), 0.0)
+            if "max_fps_override" in metadata:
+                maxf = _to_float(metadata.get("max_fps_override", 0.0), 0.0)
+                if maxf > 0:
+                    max_fps = maxf
         video_filename = video
 
         # Handle force_fps type coercion (ComfyUI may pass empty dict for optional params)
@@ -453,80 +673,74 @@ class PowerLoadVideo:
         if not os.path.exists(filename):
             raise ValueError(f"Video file not found: {filename}")
 
-        # Open video with OpenCV
-        cap = cv2.VideoCapture(filename)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video file: {filename}")
-
-        # Get video properties
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        native_fps = cap.get(cv2.CAP_PROP_FPS)
-        if native_fps <= 0:
-            native_fps = 24.0
-
-        # Calculate target FPS (same logic as VideoHelperSuite force_rate)
-        if force_fps == 0:
-            target_fps = native_fps
-        else:
-            target_fps = float(force_fps)
-
-        # Convert 1-based frame numbers to 0-based index range
-        first_idx = max(0, (start_frame or 1) - 1)
-
-        # Calculate last_idx based on max_fps if set, otherwise use end_frame
-        if max_fps > 0:
-            # max_fps is the desired OUTPUT frame count after FPS conversion
-            # Calculate required SOURCE frames: source_frames = ceil(max_fps * native_fps / target_fps)
-            fps_ratio = native_fps / target_fps  # e.g., 30/25 = 1.2 means we need 1.2x more source frames
-            required_source_frames = int(np.ceil(max_fps * fps_ratio))
-            last_idx = min(first_idx + required_source_frames - 1, total_frames - 1)
-        else:
-            # Use end_frame trim as normal
-            last_idx = (total_frames - 1) if (end_frame is None or end_frame <= 0) else min(end_frame - 1, total_frames - 1)
-
-        # Check if we're using the full video (no trimming needed)
-        full_video = (first_idx == 0) and (last_idx == total_frames - 1)
-
-        # Read frames with force_fps logic (same as VideoHelperSuite)
-        images = []
-
-        # Single continuous progress bar (same mechanism VHS Video Combine
-        # uses) spanning all three phases, with the total estimated UP FRONT so
-        # the bar only ever moves forward 0 -> 100:
-        #   phase 1: decoding source frames (1 unit per source frame)
-        #   phase 2: converting frames to tensor (1 unit per frame)
-        #   phase 3: extracting audio with ffmpeg (1 unit per second of audio)
-        expected_source_frames = last_idx - first_idx + 1
-        source_span = expected_source_frames / native_fps
-        if force_fps == 0 or force_fps == native_fps:
-            expected_output_frames = expected_source_frames
-        else:
-            expected_output_frames = int(np.ceil(source_span * target_fps))
-        audio_units = max(1, int(np.ceil(source_span)))
-        pbar_total = expected_source_frames + expected_output_frames + audio_units
-        pbar = ProgressBar(pbar_total)
-
+        # Open the video (PyAV preferred: it honours the stream's colour tags,
+        # OpenCV is only a fallback - see _open_video_source)
+        source = _open_video_source(filename)
         try:
+            total_frames = source.frame_count
+            # Some containers (Matroska, MPEG-TS, ...) do not know their frame
+            # count: decode to the end of the file instead of trusting an
+            # estimate that could cut the tail off.
+            last_frame_idx = (total_frames - 1) if total_frames > 0 else None
+            if total_frames <= 0 and source.duration > 0:
+                total_frames = int(round(source.duration * source.fps))
+
+            native_fps = source.fps
+
+            # Calculate target FPS (same logic as VideoHelperSuite force_rate)
+            if force_fps == 0:
+                target_fps = native_fps
+            else:
+                target_fps = float(force_fps)
+
+            # Convert 1-based frame numbers to 0-based index range
+            first_idx = max(0, (start_frame or 1) - 1)
+
+            # Calculate last_idx based on max_fps if set, otherwise use end_frame
+            if max_fps > 0:
+                # max_fps is the desired OUTPUT frame count after FPS conversion
+                # Calculate required SOURCE frames: source_frames = ceil(max_fps * native_fps / target_fps)
+                fps_ratio = native_fps / target_fps  # e.g., 30/25 = 1.2 means we need 1.2x more source frames
+                required_source_frames = int(np.ceil(max_fps * fps_ratio))
+                last_idx = first_idx + required_source_frames - 1
+                if last_frame_idx is not None:
+                    last_idx = min(last_idx, last_frame_idx)
+            elif end_frame is None or end_frame <= 0:
+                # Use end_frame trim as normal (None = until the end of the file)
+                last_idx = last_frame_idx
+            elif last_frame_idx is None:
+                last_idx = end_frame - 1
+            else:
+                last_idx = min(end_frame - 1, last_frame_idx)
+
+            # Check if we're using the full video (no trimming needed)
+            full_video = (first_idx == 0) and (last_idx is None or last_idx >= last_frame_idx)
+
+            # Read frames with force_fps logic (same as VideoHelperSuite)
+            images = []
+
+            # Single continuous progress bar (same mechanism VHS Video Combine
+            # uses) spanning all three phases, with the total estimated UP FRONT so
+            # the bar only ever moves forward 0 -> 100:
+            #   phase 1: decoding source frames (1 unit per source frame)
+            #   phase 2: converting frames to tensor (1 unit per frame)
+            #   phase 3: extracting audio with ffmpeg (1 unit per second of audio)
+            expected_source_frames = (last_idx - first_idx + 1) if last_idx is not None else 0
+            source_span = expected_source_frames / native_fps
+            if force_fps == 0 or force_fps == native_fps:
+                expected_output_frames = expected_source_frames
+            else:
+                expected_output_frames = int(np.ceil(source_span * target_fps))
+            audio_units = max(1, int(np.ceil(source_span)))
+            pbar_total = expected_source_frames + expected_output_frames + audio_units
+            pbar = ProgressBar(pbar_total)
+
             if force_fps == 0 or force_fps == native_fps:
                 # No FPS conversion needed - read normally
-                if full_video:
-                    while True:
-                        _abort_if_interrupted()
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        images.append(Image.fromarray(frame))
-                        pbar.update(1)
-                else:
-                    for frame_idx in range(first_idx, last_idx + 1):
-                        _abort_if_interrupted()
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                        ret, frame = cap.read()
-                        if ret:
-                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            images.append(Image.fromarray(frame))
-                        pbar.update(1)
+                for frame in source.frames(first_idx, last_idx):
+                    _abort_if_interrupted()
+                    images.append(frame)
+                    pbar.update(1)
             else:
                 # Apply force_fps: skip or duplicate frames
                 time_per_native_frame = 1.0 / native_fps
@@ -534,38 +748,17 @@ class PowerLoadVideo:
                 current_time = 0.0
                 next_target_time = 0.0
 
-                if full_video:
-                    while True:
-                        _abort_if_interrupted()
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                for frame in source.frames(first_idx, last_idx):
+                    _abort_if_interrupted()
+                    # Add frames at target times (may duplicate or skip)
+                    while next_target_time <= current_time:
+                        images.append(frame.copy())
+                        next_target_time += time_per_target_frame
 
-                        # Add frames at target times (may duplicate or skip)
-                        while next_target_time <= current_time:
-                            images.append(frame.copy())
-                            next_target_time += time_per_target_frame
-
-                        current_time += time_per_native_frame
-                        pbar.update(1)
-                else:
-                    for frame_idx in range(first_idx, last_idx + 1):
-                        _abort_if_interrupted()
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                        while next_target_time <= current_time:
-                            images.append(frame.copy())
-                            next_target_time += time_per_target_frame
-
-                        current_time += time_per_native_frame
-                        pbar.update(1)
+                    current_time += time_per_native_frame
+                    pbar.update(1)
         finally:
-            cap.release()
+            source.close()
 
         if not images:
             raise ValueError("No frames could be loaded from video")
@@ -661,7 +854,8 @@ class PowerLoadVideo:
                                   pbar_units=audio_units)
         else:
             audio_start_time = first_idx / native_fps
-            audio_duration = (last_idx - first_idx + 1) / native_fps
+            # last_idx is None for containers without a frame count: 0 = to the end
+            audio_duration = ((last_idx - first_idx + 1) if last_idx is not None else 0) / native_fps
             audio = extract_audio(filename, audio_start_time, audio_duration,
                                   pbar=pbar, pbar_base=audio_pbar_base,
                                   pbar_units=audio_units)
@@ -703,7 +897,8 @@ class PowerLoadVideo:
         return (image_tensor, high_tensor if high_active else image_tensor, audio, image_tensor.shape[0], video_metadata)
 
     def pil_totensor(self, images, pbar=None, pbar_base=0):
-        """Convert list of PIL Images to PyTorch tensor [N, H, W, C] in [0, 1].
+        """Convert a list of RGB frames (PIL Images or uint8 numpy arrays) to a
+        PyTorch tensor [N, H, W, C] in [0, 1].
 
         If a pbar is given, each converted frame advances the shared bar
         (continuing from pbar_base). The total is NOT changed here - it was
