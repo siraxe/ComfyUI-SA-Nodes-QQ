@@ -353,6 +353,11 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
       cells are never sampled or resized (skipped for speed). image_low (and
       its mask) inherit this automatically since they are derived from the
       main output.
+    - image_source_high: the top-left cell cropped out of the finished "image"
+      output (single frame, not the whole grid canvas). Since the grid canvas
+      is already sized to high_MP, the cell comes out at high_MP quality
+      without any extra resampling. Without a grid it is just the first frame
+      of the output.
     """
     NODE_NAME = "Image Blend GPU Advanced"
 
@@ -397,8 +402,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "MASK")
-    RETURN_NAMES = ("image", "mask", "image_low", "mask_low")
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "MASK", "IMAGE")
+    RETURN_NAMES = ("image", "mask", "image_low", "mask_low", "image_source_high")
     FUNCTION = 'image_blend_gpu_advanced'
     CATEGORY = 'WanVideoWrapper_QQ/image'
 
@@ -682,6 +687,19 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         """Apply the optional grid (from the Image Blend Grid node), then
         run the shared high_MP / resize_to_32 / mask_inner_erode / low_MP
         post-processing."""
+        # --- image_source_high: the top-left cell of the finished "image"
+        #     output, cropped out after all processing (single frame). When a
+        #     grid is built, figure out the cell size from the layout so the
+        #     crop can be taken from the final canvas. ---
+        source_cell = None  # None -> take the whole first frame
+        if enable_grid is not None and str(enable_grid.get("enable", "false")).lower() != "false":
+            try:
+                cols, rows = (int(v) for v in str(enable_grid.get("enable", "false")).lower().split("x"))
+                if cols >= 1 and rows >= 1:
+                    source_cell = (cols, rows)  # (cols, rows) - resolved after the grid is built
+            except ValueError:
+                pass
+
         if enable_grid is not None and str(enable_grid.get("enable", "false")).lower() != "false":
             # _build_grid sizes its canvas to hit high_MP directly (single-pass
             # cell resize), so pass high_MP=0.0 to _finalize_output to avoid a
@@ -697,7 +715,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         return self._finalize_output(output_bhwc, output_mask,
                                      resize_to_32, scale_method,
                                      mask_inner_erode,
-                                     high_MP, low_MP, pbar=pbar)
+                                     high_MP, low_MP, pbar=pbar,
+                                     source_cell=source_cell)
 
     def _build_grid(self, output_bhwc, output_mask, grid_cfg, scale_method="lanczos",
                     high_MP=0.0, fill_black=False):
@@ -837,10 +856,14 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
 
     def _finalize_output(self, output_bhwc, output_mask,
                          resize_to_32, scale_method, mask_inner_erode,
-                         high_MP, low_MP, pbar=None):
+                         high_MP, low_MP, pbar=None, source_cell=None):
         """Apply high_MP scaling, resize_to_32 cropping, mask_inner_erode mask
         erosion and the low_MP copy to a composited (image, mask) pair and
-        build the return tuple. All resizes use the selected scale_method."""
+        build the return tuple. All resizes use the selected scale_method.
+        source_cell is an optional (cols, rows) grid layout: the image_source_high
+        output is then the top-left cell cropped from the FINAL (fully
+        processed) output, as a single frame. Without it, image_source_high is
+        just the first frame of the output."""
         # --- Optional high-megapixel scale of the main output (before resize_to_32) ---
         if high_MP > 0.0:
             src_h, src_w = output_bhwc.shape[1], output_bhwc.shape[2]
@@ -867,6 +890,20 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
                 print(f"[INFO] resize_to_32: center-cropping output to "
                       f"{output_bhwc.shape[2]}x{output_bhwc.shape[1]}.")
             output_mask = output_mask_4d.squeeze(-1)
+
+        # --- image_source_high: crop the top-left cell out of the FINAL
+        #     output (a single frame). The canvas is already at high_MP, so
+        #     this is a pure crop - no extra resampling. ---
+        if source_cell is not None:
+            cols, rows = source_cell
+            canvas_h, canvas_w = output_bhwc.shape[1], output_bhwc.shape[2]
+            cell_h = max(1, canvas_h // rows)
+            cell_w = max(1, canvas_w // cols)
+            source_high = output_bhwc[:1, :cell_h, :cell_w, :]
+            print(f"[INFO] image_source_high: cropped top-left cell "
+                  f"{cell_w}x{cell_h} from the {canvas_w}x{canvas_h} output.")
+        else:
+            source_high = output_bhwc[:1]
 
         # --- Optional: erode the mask inwards (inner feather), but only from
         #     the right and bottom sides of the image; the top/left borders
@@ -929,7 +966,8 @@ class ImageBlend_GPU_advanced(ImageBlend_GPU):
         # CPU download phase: last unit of the bar
         comfy.model_management.throw_exception_if_processing_interrupted()
         result = (output_bhwc.cpu(), output_mask.cpu(),
-                  image_low.cpu(), mask_low.squeeze(-1).cpu())
+                  image_low.cpu(), mask_low.squeeze(-1).cpu(),
+                  source_high.contiguous().cpu())
         if pbar is not None:
             pbar.update(1)
         return result
