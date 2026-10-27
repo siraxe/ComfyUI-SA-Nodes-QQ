@@ -427,6 +427,25 @@ class WanInfoDialog extends WanDialog {
                 opacity: 1;
                 transform: translateY(0px);
             }
+
+            /* Constrain long prompt text (positive/negative) so the caption
+               doesn't grow past the image and clip off the Copy+ button. */
+            .rgthree-info-dialog .rgthree-info-images figure figcaption > span.-info-field-long {
+                display: block;
+                max-height: 8.8em; /* ~8 lines at 11px font */
+                overflow-y: auto;
+                overscroll-behavior: contain;
+            }
+            .rgthree-info-dialog .rgthree-info-images figure figcaption > span.-info-field-long > label {
+                position: sticky;
+                left: 0;
+            }
+            .rgthree-info-dialog .rgthree-info-images figure figcaption > span.-info-field-long::-webkit-scrollbar {
+                width: 6px;
+            }
+            .rgthree-info-dialog .rgthree-info-images figure figcaption > span.-info-field-long::-webkit-scrollbar-thumb {
+                background: #444;
+            }
         `;
 
         const style = document.createElement('style');
@@ -766,5 +785,8 @@ function saveEditableRow(info, tr, saving = true) {
 }
 
 function imgInfoField(label, value) {
-    return value != null ? `<span>${label ? `<label>${label} </label>` : ""}${value}</span>` : "";
+    if (value == null) return "";
+    const isLong = label === "positive" || label === "negative";
+    const cls = isLong ? ` class="-info-field-long"` : "";
+    return `<span${cls}>${label ? `<label>${label} </label>` : ""}${value}</span>`;
 }
