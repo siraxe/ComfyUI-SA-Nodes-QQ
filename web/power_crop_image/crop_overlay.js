@@ -2,9 +2,9 @@
  * CropOverlayWidget — draggable/resizable crop box.
  * Draws the green overlay on the CropCanvas during mouse interaction.
  */
-import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
+import { QQBaseWidget } from '../power_spline_editor/drawing_utils.js';
 
-export class CropOverlayWidget extends RgthreeBaseWidget {
+export class CropOverlayWidget extends QQBaseWidget {
   constructor(name = "crop_overlay") {
     super(name);
     this.type = 'custom';

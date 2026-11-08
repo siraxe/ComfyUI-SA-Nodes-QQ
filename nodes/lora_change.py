@@ -27,7 +27,7 @@ class LoraReduceRank:
     EXPERIMENTAL = True
     DESCRIPTION = "Resize a LoRA model by reducing it's rank. Based on kohya's sd-scripts."
 
-    CATEGORY = "KJNodes/lora"
+    CATEGORY = "QQ/lora"
 
     def save(self, lora_name, new_rank, output_dtype, dynamic_method, dynamic_param, verbose):
 
@@ -110,7 +110,7 @@ class LoraRemapStrength:
     RETURN_TYPES = ()
     FUNCTION = "save"
     OUTPUT_NODE = True
-    CATEGORY = "KJNodes/lora"
+    CATEGORY = "QQ/lora"
 
     def save(self, lora_name, reference_strength, target_strength, create_missing_alpha, output_dtype):
         print(f"[LoraRemapStrength DEBUG] Starting with inputs:")

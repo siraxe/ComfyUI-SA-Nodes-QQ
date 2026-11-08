@@ -8,7 +8,7 @@ import {
   makeUUID,
   loadScript,
   create_documentation_stylesheet,
-  RgthreeBaseWidget,
+  QQBaseWidget,
   DimensionsWidget,
   PowerSplineHeaderWidget,
   NodeSizeManager,

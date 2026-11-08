@@ -1,4 +1,4 @@
-import { rgthreeApi } from "./rgthree_api.js";
+import { vidApi } from "./wanvid_api.js";
 import { api } from "../../../scripts/api.js";
 import { generatePreviewFromFirstImage } from "./image_utils.js";
 
@@ -22,15 +22,15 @@ class BaseModelInfoService extends EventTarget {
     }
     async clearFetchedInfo(file) {
         if (this.modelInfoType === 'loras') {
-            await rgthreeApi.clearSingleLoraInfo(file);
+            await vidApi.clearSingleLoraInfo(file);
         } else if (this.modelInfoType === 'checkpoints') {
-            await rgthreeApi.clearSingleCheckpointInfo(file);
+            await vidApi.clearSingleCheckpointInfo(file);
         }
         this.fileToInfo.delete(file);
         return null;
     }
     async savePartialInfo(file, data, options = {}) {
-        let info = await rgthreeApi.saveModelInfo(this.modelInfoType, file, data);
+        let info = await vidApi.saveModelInfo(this.modelInfoType, file, data);
         this.fileToInfo.set(file, info);
 
         // Generate preview image for LoRAs ONLY if explicitly requested and we have image data
@@ -44,7 +44,6 @@ class BaseModelInfoService extends EventTarget {
 
                 // Generate and save preview image
                 const previewResult = await generatePreviewFromFirstImage(info, loraName, loraPath);
-                console.log(`[LoraInfoService] Preview image generated for ${loraName}:`, previewResult);
             } catch (error) {
                 console.warn(`[LoraInfoService] Failed to generate preview image for ${file}:`, error);
                 // Don't let preview generation failure stop the save operation
@@ -64,10 +63,10 @@ class BaseModelInfoService extends EventTarget {
         var _a;
         let info = null;
         if (!refresh) {
-            info = await rgthreeApi.getModelsInfo({ type: this.modelInfoType, files: [file], light });
+            info = await vidApi.getModelsInfo({ type: this.modelInfoType, files: [file], light });
         }
         else {
-            info = await rgthreeApi.refreshModelsInfo({ type: this.modelInfoType, files: [file] });
+            info = await vidApi.refreshModelsInfo({ type: this.modelInfoType, files: [file] });
         }
         info = (_a = info === null || info === void 0 ? void 0 : info[0]) !== null && _a !== void 0 ? _a : null;
         if (!light) {

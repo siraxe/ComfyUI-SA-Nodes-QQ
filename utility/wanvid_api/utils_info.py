@@ -128,7 +128,7 @@ async def get_model_info(
   should_save = False
   # basic data
   basic_data = get_file_info(file, model_type)
-  # Try to load a rgthree-info.json file next to the file.
+  # Try to load the model info json file next to the file.
   info_data = get_model_info_file_data(file, model_type, default={})
 
   for key in ['file', 'path', 'modified', 'imageLocal', 'hasInfoFile']:
@@ -196,7 +196,7 @@ async def get_model_info(
     save_model_info(file, info_data, model_type)
 
     # If we're saving, then the UI is likely waiting to see if the refreshed data is coming in.
-    await PromptServer.instance.send(f"rgthree-refreshed-{model_type}-info", {"data": info_data})
+    await PromptServer.instance.send(f"wanvid-refreshed-{model_type}-info", {"data": info_data})
 
   return info_data
 

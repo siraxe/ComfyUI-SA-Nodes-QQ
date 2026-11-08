@@ -5,10 +5,10 @@
 import { app } from '../../../scripts/app.js';
 import {
   drawWidgetButton,
-  RgthreeBaseWidget,
+  QQBaseWidget,
 } from '../power_spline_editor/drawing_utils.js';
 
-export class PowerCropTopRowWidget extends RgthreeBaseWidget {
+export class PowerCropTopRowWidget extends QQBaseWidget {
   constructor(name = "PowerCropTopRow") {
     super(name);
     this.type = "custom";

@@ -2,7 +2,7 @@
 import {
     drawWidgetButton,
     drawNumberWidgetPart,
-    RgthreeBaseWidget
+    QQBaseWidget
 } from './drawing_utils.js';
 import { app } from '../../../scripts/app.js';
 
@@ -541,7 +541,7 @@ export async function handleFramesRefresh(node) {
 // == TOP ROW WIDGET
 
 
-export class TopRowWidget extends RgthreeBaseWidget {
+export class TopRowWidget extends QQBaseWidget {
   constructor(name = "TopRowWidget", controlsVisibility = {}, handlers = {}) {
     super(name);
     this.type = "custom";

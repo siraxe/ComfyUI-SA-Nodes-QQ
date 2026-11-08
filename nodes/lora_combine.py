@@ -271,7 +271,7 @@ class LoraSmartCombine:
     RETURN_TYPES = ()
     FUNCTION = "combine"
     OUTPUT_NODE = True
-    CATEGORY = "KJNodes/lora"
+    CATEGORY = "QQ/lora"
     DESCRIPTION = "Smartly combine multiple LoRAs with rank extension using SVD decomposition"
 
     def combine(self, lora_1_name, lora_2_name, lora_3_name, lora_4_name,

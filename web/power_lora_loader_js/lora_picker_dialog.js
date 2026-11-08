@@ -7,7 +7,6 @@ import { CHECKPOINT_INFO_SERVICE } from "./model_info_service.js";
 
 // Function to show context menu for LoRA list items
 function showLoraListContextMenu(event, loraName) {
-    console.log("[LoraPickerDialog] Opening context menu for:", loraName); // Debug log
     // Remove any existing context menu
     const existingMenu = document.getElementById('lora-list-context-menu');
     if (existingMenu) {
@@ -91,7 +90,6 @@ function showLoraListContextMenu(event, loraName) {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                console.log('Explorer opened successfully for:', loraName);
             } else {
                 console.error('Failed to open Explorer:', data.error || 'Unknown error');
             }
@@ -128,7 +126,6 @@ function showLoraListContextMenu(event, loraName) {
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    console.log('Explorer opened successfully for model:', loraName);
                 } else {
                     console.error('Failed to open Explorer for model:', data.error || 'Unknown error');
                 }
@@ -187,11 +184,9 @@ function showLoraInfoDialog(loraName) {
         const infoDialog = new WanLoraInfoDialog(loraName).show();
         // Store the item type for use in preview generation
         infoDialog.itemType = 'loras';
-        console.log(`[LoraPickerDialog Debug] Created LoRA dialog with itemType: ${infoDialog.itemType}`);
         infoDialog.addEventListener("close", ((e) => {
             if (e.detail.dirty) {
                 // Dialog was modified, could trigger refresh if needed
-                console.log("LoRA info was modified");
             }
         }));
     }).catch(error => {
@@ -211,17 +206,14 @@ function showModelInfoDialog(modelName) {
         return;
     }
 
-    console.log(`[LoraPickerDialog] Opening info dialog for model: ${modelName}`);
 
     // Import the dialog dynamically and create a model-specific info dialog
     import("./dialog_info.js").then(({ WanLoraInfoDialog }) => {
         // Create a model-specific info dialog by extending WanLoraInfoDialog
         class WanModelInfoDialog extends WanLoraInfoDialog {
             async getModelInfo(file) {
-                console.log(`[LoraPickerDialog] Fetching info for model: ${file}`);
                 try {
                     const info = await CHECKPOINT_INFO_SERVICE.getInfo(file, false, false);
-                    console.log(`[LoraPickerDialog] Model info received:`, info);
                     return info;
                 } catch (error) {
                     console.error(`[LoraPickerDialog] Error fetching model info:`, error);
@@ -237,11 +229,8 @@ function showModelInfoDialog(modelName) {
 
             // Override refreshModelInfo to use CHECKPOINT_INFO_SERVICE instead of LORA_INFO_SERVICE
             async refreshModelInfo(file) {
-                console.log(`[LoraPickerDialog] Refreshing model info for: ${file}`);
-                console.log(`[LoraPickerDialog] Using CHECKPOINT_INFO_SERVICE for Civitai fetch`);
                 try {
                     const info = await CHECKPOINT_INFO_SERVICE.refreshInfo(file);
-                    console.log(`[LoraPickerDialog] Model info refreshed from Civitai:`, info);
                     return info;
                 } catch (error) {
                     console.error(`[LoraPickerDialog] Error refreshing model info from Civitai:`, error);
@@ -257,10 +246,8 @@ function showModelInfoDialog(modelName) {
 
             // Override the save method to use CHECKPOINT_INFO_SERVICE
             async savePartialInfo(info, fieldName, newValue) {
-                console.log(`[LoraPickerDialog] Saving model info: ${fieldName} = ${newValue}`);
                 try {
                     await CHECKPOINT_INFO_SERVICE.savePartialInfo(info.file, { [fieldName]: newValue });
-                    console.log(`[LoraPickerDialog] Model info saved successfully`);
                     return true;
                 } catch (error) {
                     console.error(`[LoraPickerDialog] Error saving model info:`, error);
@@ -273,7 +260,6 @@ function showModelInfoDialog(modelName) {
         const dialog = new WanModelInfoDialog(modelName);
         // Store the item type for use in preview generation
         dialog.itemType = 'checkpoints';
-        console.log(`[LoraPickerDialog Debug] Created model dialog with itemType: ${dialog.itemType}`);
         dialog.show();
     }).catch(error => {
         // Fallback to simple alert if dialog fails to load
@@ -370,6 +356,65 @@ style.textContent = `
     font-size: 11px !important;
     text-align: left !important;
     color: #ddd !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    user-select: none !important;
+    flex: 1 !important;
+}
+
+.lora-picker-folder-arrow {
+    font-size: 9px !important;
+    color: #999 !important;
+    margin-left: auto !important;
+    margin-right: 2px !important;
+    padding: 1px 4px !important;
+    cursor: pointer !important;
+    user-select: none !important;
+    flex-shrink: 0 !important;
+    border-radius: 2px !important;
+    transition: color 0.2s !important;
+}
+
+.lora-picker-folder-arrow:hover {
+    color: #fff !important;
+    background-color: #3a3a3a !important;
+}
+
+.lora-picker-subfolder-item {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    padding: 2px 4px 2px 18px !important;
+    cursor: pointer !important;
+    border-radius: 0px !important;
+    transition: background-color 0.2s !important;
+    margin: 0 !important;
+    border-left: 2px solid transparent !important;
+    border-right: 2px solid transparent !important;
+}
+
+.lora-picker-subfolder-item:hover {
+    background-color: #333 !important;
+}
+
+.lora-picker-subfolder-item.selected {
+    background-color: #2a2a2a !important;
+    border-left: 2px solid #89B !important;
+    border-right: 2px solid #89B !important;
+}
+
+.lora-picker-subfolder-icon {
+    font-size: 10px !important;
+    margin-right: 4px !important;
+    color: #89B !important;
+    flex-shrink: 0 !important;
+}
+
+.lora-picker-subfolder-name {
+    font-size: 10px !important;
+    text-align: left !important;
+    color: #bbb !important;
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
@@ -664,6 +709,16 @@ function loadSelectedFolder() {
     return selectedFolder !== null ? JSON.parse(selectedFolder) : null;
 }
 
+// Persistence functions for selected subfolder
+function saveSelectedSubfolder(selectedSubfolder) {
+    localStorage.setItem("wanVideoPowerLoraLoader.selectedSubfolder", JSON.stringify(selectedSubfolder));
+}
+
+function loadSelectedSubfolder() {
+    const selectedSubfolder = localStorage.getItem("wanVideoPowerLoraLoader.selectedSubfolder");
+    return selectedSubfolder !== null ? JSON.parse(selectedSubfolder) : null;
+}
+
 // Persistence functions for eye refresh button state
 function saveEyeRefreshState(eyeRefreshState) {
     localStorage.setItem("wanVideoPowerLoraLoader.eyeRefreshState", JSON.stringify(eyeRefreshState));
@@ -679,12 +734,14 @@ function saveAllUIState(dialog) {
         foldersVisible: dialog.options.foldersVisible,
         eyeRefreshState: dialog.eyeRefreshState,
         selectedFolder: dialog.selectedFolder,
+        selectedSubfolder: dialog.selectedSubfolder || null,
         circleIconState: dialog.circleIconState
     };
 
     saveFoldersVisible(dialog.options.foldersVisible);
     saveEyeRefreshState(dialog.eyeRefreshState);
     saveSelectedFolder(dialog.selectedFolder);
+    saveSelectedSubfolder(dialog.selectedSubfolder || null);
 
     if (dialog.parentNode && dialog.parentNode.widgets) {
         // Try both widget names to support both node types
@@ -707,6 +764,7 @@ function loadAllUIState(dialog) {
         foldersVisible: undefined,
         eyeRefreshState: undefined,
         selectedFolder: undefined,
+        selectedSubfolder: undefined,
         circleIconState: undefined
     };
 
@@ -734,6 +792,9 @@ function loadAllUIState(dialog) {
     if (uiState.selectedFolder === undefined) {
         uiState.selectedFolder = loadSelectedFolder();
     }
+    if (uiState.selectedSubfolder === undefined) {
+        uiState.selectedSubfolder = loadSelectedSubfolder();
+    }
     if (uiState.circleIconState === undefined) {
         uiState.circleIconState = 0; // Default to 0 (empty circle)
     }
@@ -741,6 +802,7 @@ function loadAllUIState(dialog) {
     dialog.options.foldersVisible = uiState.foldersVisible !== false;
     dialog.eyeRefreshState = uiState.eyeRefreshState || false;
     dialog.selectedFolder = uiState.selectedFolder || null;
+    dialog.selectedSubfolder = uiState.selectedSubfolder || null;
     dialog.circleIconState = uiState.circleIconState || 0;
 
     if (dialog.parentNode && dialog.parentNode.widgets) {
@@ -770,6 +832,10 @@ export class LoraPickerDialog {
         this.parentNode = options.parentNode || null;
 
         this.sidebarWidth = 150;
+
+        // Subfolder support state (must exist before loadAllUIState restores it)
+        this.expandedFolders = new Set();
+        this.selectedSubfolder = null;
 
         loadAllUIState(this);
 
@@ -1343,36 +1409,130 @@ export class LoraPickerDialog {
         }
     }
     
+    // Returns the distinct subfolder names (second path segment) under a given
+    // top-level folder - only subfolders that directly contain loras.
+    getSubfolders(parentFolder) {
+        const subs = new Set();
+        for (const lora of this.loras) {
+            const name = typeof lora === 'string' ? lora : lora.name;
+            if (!name) continue;
+            const parts = name.split(/[\/\\]/);
+            if (parts.length >= 3 && parts[0] === parentFolder && parts[1]) {
+                subs.add(parts[1]);
+            }
+        }
+        return [...subs].sort((a, b) => a.localeCompare(b));
+    }
+
     renderFoldersInSidebar(container) {
         container.innerHTML = "";
 
         for (const folder of this.folders) {
+            // Wrapper holds the folder row and (when expanded) its subfolders
+            const wrapper = document.createElement("div");
+            wrapper.className = "lora-picker-folder-wrapper";
+
             const folderItem = document.createElement("div");
             folderItem.className = "lora-picker-folder-item";
             if (this.selectedFolder === folder) {
                 folderItem.classList.add("selected");
             }
-            
+
             // Folder icon
             const folderIcon = document.createElement("div");
             folderIcon.className = "lora-picker-folder-icon";
             folderIcon.textContent = "📁";
-            
+
             // Folder name
             const folderName = document.createElement("div");
             folderName.className = "lora-picker-folder-name";
             folderName.textContent = folder;
-            
+
             folderItem.appendChild(folderIcon);
             folderItem.appendChild(folderName);
-            
-            // Add click handler
+
+            // Add click handler for the folder row
             folderItem.addEventListener("click", () => {
                 this.selectFolder(folder);
             });
-            
-            container.appendChild(folderItem);
+
+            // Folder row goes first...
+            wrapper.appendChild(folderItem);
+
+            // Down arrow for folders that have subdirectories (right-aligned).
+            // Only shows subfolders 1 level deep.
+            const subfolders = folder === "root" ? [] : this.getSubfolders(folder);
+            if (subfolders.length > 0) {
+                const isExpanded = this.expandedFolders.has(folder);
+                const arrow = document.createElement("div");
+                arrow.className = "lora-picker-folder-arrow";
+                arrow.textContent = isExpanded ? "▼" : "▶";
+                arrow.title = isExpanded ? "Collapse subfolders" : "Show subfolders";
+                arrow.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    if (this.expandedFolders.has(folder)) {
+                        this.expandedFolders.delete(folder);
+                    } else {
+                        this.expandedFolders.add(folder);
+                    }
+                    this.renderFoldersInSidebar(container);
+                });
+                folderItem.appendChild(arrow);
+
+                // ...then the subfolder rows underneath it
+                if (isExpanded) {
+                    for (const sub of subfolders) {
+                        const subItem = document.createElement("div");
+                        subItem.className = "lora-picker-subfolder-item";
+                        if (this.selectedFolder === folder && this.selectedSubfolder === sub) {
+                            subItem.classList.add("selected");
+                        }
+
+                        const subIcon = document.createElement("div");
+                        subIcon.className = "lora-picker-subfolder-icon";
+                        subIcon.textContent = "📂";
+
+                        const subName = document.createElement("div");
+                        subName.className = "lora-picker-subfolder-name";
+                        subName.textContent = sub;
+
+                        subItem.appendChild(subIcon);
+                        subItem.appendChild(subName);
+
+                        subItem.addEventListener("click", () => {
+                            this.selectSubfolder(folder, sub);
+                        });
+
+                        wrapper.appendChild(subItem);
+                    }
+                }
+            }
+
+            container.appendChild(wrapper);
         }
+    }
+
+    getSidebarFolderContainer() {
+        return this.sidebar
+            ? (this.sidebar.querySelector(".lora-picker-sidebar-content") || this.sidebar)
+            : null;
+    }
+
+    selectSubfolder(parentFolder, subfolder) {
+        // Clicking the already selected subfolder deselects it (parent stays)
+        if (this.selectedFolder === parentFolder && this.selectedSubfolder === subfolder) {
+            this.selectedSubfolder = null;
+            saveAllUIState(this);
+            this.renderFoldersInSidebar(this.getSidebarFolderContainer());
+            this.renderList();
+            return;
+        }
+
+        this.selectedFolder = parentFolder;
+        this.selectedSubfolder = subfolder;
+        saveAllUIState(this);
+        this.renderFoldersInSidebar(this.getSidebarFolderContainer());
+        this.renderList();
     }
 
     extractFolders() {
@@ -1410,20 +1570,25 @@ export class LoraPickerDialog {
                 prevSelected.classList.remove("selected");
             }
             this.selectedFolder = null;
+            this.selectedSubfolder = null;
             // Save all UI state to both localStorage and workflow
             saveAllUIState(this);
             // Update indicator line visibility
             this.updateFolderIndicator();
+            this.renderFoldersInSidebar(this.getSidebarFolderContainer());
             this.renderList(); // Refresh the list
             return;
         }
-        
+
         // Remove selection from previous folder
         const prevSelected = this.sidebar.querySelector(".lora-picker-folder-item.selected");
         if (prevSelected) {
             prevSelected.classList.remove("selected");
         }
-        
+
+        // Switching to a different folder clears any subfolder filter
+        this.selectedSubfolder = null;
+
         // Add selection to new folder
         const folderItems = this.sidebar.querySelectorAll(".lora-picker-folder-item");
         for (const item of folderItems) {
@@ -1433,12 +1598,13 @@ export class LoraPickerDialog {
                 break;
             }
         }
-        
+
         this.selectedFolder = folderName;
         // Save all UI state to both localStorage and workflow
         saveAllUIState(this);
         // Update indicator line visibility
         this.updateFolderIndicator();
+        this.renderFoldersInSidebar(this.getSidebarFolderContainer());
         this.renderList(); // Refresh the list
     }
 
@@ -1455,12 +1621,23 @@ export class LoraPickerDialog {
             // Remove folder prefix for display purposes only (first level only)
             let displayName = name;
             if (this.selectedFolder && this.selectedFolder !== "root") {
-                const prefix = this.selectedFolder + "/";
-                const altPrefix = this.selectedFolder + "\\";
+                // Strip the subfolder prefix too when one is selected
+                const prefix = this.selectedSubfolder
+                    ? this.selectedFolder + "/" + this.selectedSubfolder + "/"
+                    : this.selectedFolder + "/";
+                const altPrefix = prefix.replace("/", "\\");
                 if (name.startsWith(prefix)) {
                     displayName = name.substring(prefix.length);
                 } else if (name.startsWith(altPrefix)) {
                     displayName = name.substring(altPrefix.length);
+                } else if (!this.selectedSubfolder) {
+                    const plainPrefix = this.selectedFolder + "/";
+                    const plainAltPrefix = this.selectedFolder + "\\";
+                    if (name.startsWith(plainPrefix)) {
+                        displayName = name.substring(plainPrefix.length);
+                    } else if (name.startsWith(plainAltPrefix)) {
+                        displayName = name.substring(plainAltPrefix.length);
+                    }
                 }
             }
 
@@ -1582,8 +1759,15 @@ export class LoraPickerDialog {
 
         let filteredLoras = loras;
 
-        // Filter by selected folder
-        if (this.selectedFolder && this.selectedFolder !== "root") {
+        // Filter by selected folder + subfolder (subfolder takes precedence)
+        if (this.selectedFolder && this.selectedFolder !== "root" && this.selectedSubfolder) {
+            const prefixFwd = this.selectedFolder + "/" + this.selectedSubfolder + "/";
+            const prefixBck = this.selectedFolder + "\\" + this.selectedSubfolder + "\\";
+            filteredLoras = filteredLoras.filter(l => {
+                const name = typeof l === 'string' ? l : l.name;
+                return !!name && (name.startsWith(prefixFwd) || name.startsWith(prefixBck));
+            });
+        } else if (this.selectedFolder && this.selectedFolder !== "root") {
             filteredLoras = filteredLoras.filter(l => {
                 const name = typeof l === 'string' ? l : l.name;
                 // Check if the lora is in the selected folder
@@ -2104,7 +2288,6 @@ export class LoraPickerDialog {
         menu.appendChild(createMenuItem('📊 Show Stats', async () => {
             // Show comprehensive LoRA statistics
             try {
-                console.log('📊 Gathering LoRA statistics...');
 
                 // Get all available LoRA names from the system
                 const allLoras = await fetch('/wanvid/api/loras')
@@ -2262,7 +2445,6 @@ export class LoraPickerDialog {
             // Update preview availability cache and refresh
             try {
                 await this.loadPreviewAvailability();
-                console.log('Preview availability cache updated successfully');
             } catch (error) {
                 console.warn('Failed to update preview availability cache:', error);
             }

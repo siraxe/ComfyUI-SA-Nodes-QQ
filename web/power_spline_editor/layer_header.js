@@ -1,8 +1,8 @@
 // Header widget that displays column labels for spline layers
 import { app } from '../../../scripts/app.js';
-import { isLowQuality, drawTogglePart, drawNumberWidgetPart, RgthreeBaseWidget } from './drawing_utils.js';
+import { isLowQuality, drawTogglePart, drawNumberWidgetPart, QQBaseWidget } from './drawing_utils.js';
 
-export class PowerSplineHeaderWidget extends RgthreeBaseWidget {
+export class PowerSplineHeaderWidget extends QQBaseWidget {
     constructor(name = "PowerSplineHeaderWidget") {
         super(name);
         this.value = { type: "PowerSplineHeaderWidget" };

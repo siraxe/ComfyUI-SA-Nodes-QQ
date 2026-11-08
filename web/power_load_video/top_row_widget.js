@@ -3,9 +3,9 @@
  * Similar to Power Spline Editor's top row with Refresh button and text inputs
  */
 import { app } from '../../../scripts/app.js';
-import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
+import { QQBaseWidget } from '../power_spline_editor/drawing_utils.js';
 
-export class PowerLoadVideoTopRowWidget extends RgthreeBaseWidget {
+export class PowerLoadVideoTopRowWidget extends QQBaseWidget {
     constructor(name = "PowerLoadVideoTopRow") {
         super(name);
         this.type = "custom";

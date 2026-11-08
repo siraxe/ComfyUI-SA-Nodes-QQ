@@ -2,9 +2,9 @@
  * Timeline Widget for video playback control
  * Styled to match Power Spline Editor's timeline aesthetic
  */
-import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
+import { QQBaseWidget } from '../power_spline_editor/drawing_utils.js';
 
-export class PowerLoadVideoTimelineWidget extends RgthreeBaseWidget {
+export class PowerLoadVideoTimelineWidget extends QQBaseWidget {
     constructor(name = "PowerLoadVideoTimeline") {
         super(name);
         this.type = "custom";
@@ -602,7 +602,7 @@ export class PowerLoadVideoTimelineWidget extends RgthreeBaseWidget {
 
     /**
      * Drag to seek along timeline
-     * Called by base class RgthreeBaseWidget when mouse is dragged over hit area
+     * Called by base class QQBaseWidget when mouse is dragged over hit area
      * Uses direct position calculation for smooth real-time scrubbing
      */
     dragSeek(event, pos, node) {

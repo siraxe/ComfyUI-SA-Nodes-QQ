@@ -1,6 +1,6 @@
 // Import necessary modules
 import { generatePreviewFromFirstImage } from "./image_utils.js";
-import { rgthreeApi } from "./rgthree_api.js";
+import { vidApi } from "./wanvid_api.js";
 
 /**
  * Batch Fetch Service - Handles bulk LoRA info fetching and preview generation
@@ -160,7 +160,6 @@ export class BatchFetchService {
             if (isVideo) {
                 hasVideos = true;
                 videoCount++;
-                console.log(`🎥 Skipping video preview: ${image.url}`);
 
                 // Only skip if SKIP_VIDEO_PREVIEWS is enabled
                 if (!BatchFetchService.BATCH_CONFIG.SKIP_VIDEO_PREVIEWS) {
@@ -172,7 +171,6 @@ export class BatchFetchService {
         }
 
         if (hasVideos) {
-            console.log(`ℹ️ Found ${videoCount} video preview(s), ${BatchFetchService.BATCH_CONFIG.SKIP_VIDEO_PREVIEWS ? 'skipping' : 'including'} them`);
         }
 
         return {
@@ -197,7 +195,6 @@ export class BatchFetchService {
 
             return response.ok;
         } catch (error) {
-            console.log(`Error checking placeholder preview for ${loraName}:`, error);
             return false;
         }
     }
@@ -210,7 +207,6 @@ export class BatchFetchService {
     async createPlaceholderPreview(loraName) {
         try {
             const cleanLoraName = loraName.replace(/\.[^/.]+$/, ""); // Remove extension
-            console.log(`📋 Creating placeholder preview for ${loraName} from no_preview.jpg`);
 
             // Fetch the no_preview.jpg placeholder
             const placeholderResponse = await fetch('/wanvid/api/loras/preview?file=no_preview.jpg');
@@ -237,7 +233,6 @@ export class BatchFetchService {
             }
 
             const result = await saveResponse.json();
-            console.log(`✓ Created placeholder preview for ${loraName}:`, result);
 
         } catch (error) {
             console.error(`Failed to create placeholder preview for ${loraName}:`, error);
@@ -262,7 +257,6 @@ export class BatchFetchService {
             updateProgress(overallProgress);
             updateText(`Processing ${loraName} (${index + 1}/${total})`);
 
-            console.log(`[${index + 1}/${total}] Processing ${loraName}`);
 
             // Stage 1: Fetch LoRA info with retry logic
             const loraInfo = await this.fetchLoraInfoWithRetry(loraName, checkCancelled);
@@ -279,7 +273,6 @@ export class BatchFetchService {
                 const imageFilter = this.filterVideoImages(loraInfo);
 
                 if (!imageFilter.hasImages) {
-                    console.log(`ℹ️ ${loraName}: Only video previews found (${imageFilter.videoCount} videos), skipping to prevent timeouts`);
                     return {
                         success: true,
                         loraName,
@@ -299,7 +292,6 @@ export class BatchFetchService {
                 };
 
                 updateText(`Generating preview for ${loraName} (${index + 1}/${total})`);
-                console.log(`[${index + 1}/${total}] Generating preview for ${loraName} (${imageFilter.filteredImages.length} images, skipped ${imageFilter.videoCount} videos)`);
 
                 previewResult = await this.generatePreviewsWithRetry(filteredLoraInfo, checkCancelled);
 
@@ -308,7 +300,6 @@ export class BatchFetchService {
                     throw new Error('Operation cancelled');
                 }
             } else {
-                console.log(`ℹ No images found for ${loraName}, will create placeholder preview to prevent refetching`);
             }
 
             return {
@@ -324,7 +315,6 @@ export class BatchFetchService {
 
         } catch (error) {
             if (error.message === 'Operation cancelled') {
-                console.log(`[${loraName}] Processing cancelled`);
                 throw error;
             }
 
@@ -449,7 +439,6 @@ export class BatchFetchService {
                 existing.push(loraName);
             } else if (hasPlaceholder) {
                 withPlaceholderPreviews.push(loraName);
-                console.log(`ℹ️ ${loraName}: Has placeholder preview, already processed`);
             } else {
                 missing.push(loraName);
             }
@@ -457,7 +446,6 @@ export class BatchFetchService {
 
         const processedTotal = existing.length + withPlaceholderPreviews.length;
 
-        console.log(`LoRA Preview Status: ${missing.length} missing, ${existing.length} have existing previews, ${withPlaceholderPreviews.length} have placeholder previews`);
 
         switch (filterType) {
             case 'missing':
@@ -514,7 +502,6 @@ export class BatchFetchService {
 
         for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
             try {
-                console.log(`[${loraName}] Fetching info from Civitai API (attempt ${attempt}/${maxRetries + 1})...`);
 
                 // Check for cancellation before starting API call
                 if (this.cancelFlag || checkCancelled()) {
@@ -525,7 +512,7 @@ export class BatchFetchService {
                 const adaptiveTimeout = baseTimeout * Math.pow(backoffMultiplier, attempt - 1);
 
                 // Use cancellable promise wrapper with adaptive timeout
-                const apiPromise = rgthreeApi.refreshSingleLoraInfo(loraName);
+                const apiPromise = vidApi.refreshSingleLoraInfo(loraName);
                 const result = await this.createCancellablePromise(
                     apiPromise,
                     adaptiveTimeout,
@@ -537,13 +524,11 @@ export class BatchFetchService {
                     throw new Error('Operation cancelled');
                 }
 
-                console.log(`[${loraName}] Successfully fetched info from Civitai (attempt ${attempt})`);
 
                 // Check if we got image data
                 if (result && result.length > 0) {
                     const loraInfo = result[0];
                     if (loraInfo.images && loraInfo.images.length > 0) {
-                        console.log(`[${loraName}] Found ${loraInfo.images.length} images for preview generation`);
                     } else {
                         console.warn(`[${loraName}] No images found in fetched data for preview generation`);
                     }
@@ -558,7 +543,6 @@ export class BatchFetchService {
                 const isCancelled = error.message === 'Operation cancelled' || error.message === 'Operation timeout';
 
                 if (isCancelled) {
-                    console.log(`[${loraName}] Fetch cancelled/timeout on attempt ${attempt}`);
                     throw new Error('Operation cancelled');
                 }
 
@@ -605,7 +589,6 @@ export class BatchFetchService {
 
         for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
             try {
-                console.log(`[${loraName}] Generating previews (attempt ${attempt}/${maxRetries + 1}) with params:`, { loraName, loraPath });
 
                 // Check for cancellation before starting preview generation
                 if (this.cancelFlag || checkCancelled()) {
@@ -628,7 +611,6 @@ export class BatchFetchService {
                     throw new Error('Operation cancelled');
                 }
 
-                console.log(`[${loraName}] Preview generation successful on attempt ${attempt}:`, previewResult);
                 return previewResult;
 
             } catch (error) {
@@ -636,7 +618,6 @@ export class BatchFetchService {
                 const isCancelled = error.message === 'Operation cancelled' || error.message === 'Operation timeout';
 
                 if (isCancelled) {
-                    console.log(`[${loraName}] Preview generation cancelled/timeout on attempt ${attempt}`);
                     throw new Error('Operation cancelled');
                 }
 
@@ -686,25 +667,14 @@ export class BatchFetchService {
         const filteredData = await this.filterLorasByPreviewStatus(loras, hasPreviewCallback, filterType);
         const { loras: lorasToFetch, skipped, stats } = filteredData;
 
-        // Log current configuration for performance tuning
         const config = BatchFetchService.getConfig();
-        console.log(`Batch fetch configuration:`, {
-            batchSize: config.BATCH_SIZE,
-            interLoraDelay: config.INTER_LORA_DELAY,
-            interBatchDelay: config.INTER_BATCH_DELAY,
-            adaptiveDelay: config.ADAPTIVE_DELAY_ENABLED
-        });
 
-        console.log(`Starting ${stats.type} fetch: ${stats.fetching} LoRAs to fetch, ${stats.skipped} LoRAs skipped`);
 
         if (lorasToFetch.length === 0) {
-            console.log(`No LoRAs to fetch for ${filterType} mode`);
             return { success: true, message: 'No LoRAs to process', stats };
         }
 
         try {
-            console.log(`Starting PARALLEL batch processing of ${lorasToFetch.length} LoRAs`);
-            console.log(`Configuration: batch_size=${BatchFetchService.BATCH_CONFIG.BATCH_SIZE}, concurrent=${BatchFetchService.BATCH_CONFIG.MAX_CONCURRENT_REQUESTS}`);
 
             let completedCount = 0;
             let previewGeneratedCount = 0;
@@ -719,13 +689,11 @@ export class BatchFetchService {
             for (let i = 0; i < lorasToFetch.length; i += batchSize) {
                 // Check for cancellation before processing each batch
                 if (this.cancelFlag || checkCancelled()) {
-                    console.log('Batch operation cancelled by user');
                     updateText(`Operation cancelled. Processed ${completedCount}/${totalLoras} LoRAs`);
                     break;
                 }
 
                 const batch = lorasToFetch.slice(i, i + Math.min(batchSize, totalLoras - i));
-                console.log(`Processing batch ${Math.floor(i/batchSize) + 1} with ${batch.length} LoRAs in PARALLEL:`, batch);
 
                 try {
                     // Process the entire batch in parallel
@@ -757,9 +725,7 @@ export class BatchFetchService {
                                 batchNoImages++;
                                 if (result.skippedVideos > 0) {
                                     batchVideosSkipped += result.skippedVideos;
-                                    console.log(`ℹ️ ${result.loraName}: Skipped ${result.skippedVideos} video preview(s) to prevent timeouts`);
                                 } else {
-                                    console.log(`ℹ️ ${result.loraName}: Info fetched successfully, but no preview images available`);
                                 }
 
                                 // Queue for placeholder preview creation (even if cancelled)
@@ -775,18 +741,15 @@ export class BatchFetchService {
 
                     // Create placeholder previews for LoRAs that need them (even if operation was cancelled)
                     if (placeholderPreviewQueue.length > 0) {
-                        console.log(`Creating placeholder previews for ${placeholderPreviewQueue.length} LoRAs...`);
                         for (const loraName of placeholderPreviewQueue) {
                             try {
                                 await this.createPlaceholderPreview(loraName);
-                                console.log(`✓ Created placeholder preview for ${loraName}`);
                             } catch (placeholderError) {
                                 console.warn(`⚠ Failed to create placeholder preview for ${loraName}:`, placeholderError);
                             }
                         }
                     }
 
-                    console.log(`Batch ${Math.floor(i/batchSize) + 1} completed: ${batchInfoFetched} info fetched, ${batchPreviewsGenerated} previews generated, ${batchNoImages} no images, ${batchVideosSkipped} videos skipped, ${batchFailures} failures`);
 
                     // Accumulate counts
                     videosSkippedCount += batchVideosSkipped;
@@ -794,7 +757,6 @@ export class BatchFetchService {
 
                 } catch (error) {
                     if (error.message === 'Operation cancelled') {
-                        console.log('Batch processing cancelled');
                         break;
                     }
                     console.error(`Batch ${Math.floor(i/batchSize) + 1} failed:`, error);
@@ -803,13 +765,11 @@ export class BatchFetchService {
 
                 // Check for cancellation between batches
                 if (this.cancelFlag || checkCancelled()) {
-                    console.log('Batch operation cancelled between batches');
                     break;
                 }
 
                 // Short delay between batches for API safety (cancellable)
                 if (i + batchSize < lorasToFetch.length) {
-                    console.log(`Batch ${Math.floor(i/batchSize) + 1} completed, short delay before next batch...`);
                     try {
                         await this.createCancellableDelay(
                             BatchFetchService.BATCH_CONFIG.INTER_BATCH_DELAY,
@@ -817,7 +777,6 @@ export class BatchFetchService {
                         );
                     } catch (delayError) {
                         if (delayError.message === 'Operation cancelled') {
-                            console.log('Inter-batch delay cancelled, stopping batch processing');
                             break;
                         }
                     }
@@ -859,7 +818,6 @@ export class BatchFetchService {
             }
 
             updateText(completionMessage);
-            console.log(`Batch processing ${this.cancelFlag ? 'cancelled' : 'completed'}: ${completionMessage}`);
 
             return {
                 success: !this.cancelFlag,
@@ -879,7 +837,6 @@ export class BatchFetchService {
 
         } catch (error) {
             if (error.message === 'Operation cancelled') {
-                console.log('Batch fetch operation cancelled by user');
                 updateText('Operation cancelled successfully');
                 return {
                     success: false,
@@ -909,7 +866,6 @@ export class BatchFetchService {
      * Cancel the current batch operation aggressively
      */
     cancel() {
-        console.log('Cancelling batch operation aggressively...');
         this.cancelFlag = true;
 
         // Abort any ongoing requests
@@ -928,7 +884,6 @@ export class BatchFetchService {
             ...BatchFetchService.BATCH_CONFIG,
             ...newConfig
         };
-        console.log('Batch fetch configuration updated:', BatchFetchService.BATCH_CONFIG);
     }
 
     /**
@@ -947,7 +902,6 @@ export class BatchFetchService {
      * @returns {Promise<Object>} Comprehensive statistics object
      */
     async gatherComprehensiveStats(hasPreviewCallback, allLoras) {
-        console.log('📊 Gathering comprehensive LoRA statistics...');
 
         const stats = {
             totalLoRAs: 0,
@@ -1000,7 +954,6 @@ export class BatchFetchService {
                 stats.fileTypes[extension] = (stats.fileTypes[extension] || 0) + 1;
             }
 
-            console.log('✓ LoRA statistics gathered successfully');
             return stats;
 
         } catch (error) {

@@ -39,11 +39,15 @@ from .nodes.h3_text import *
 from .nodes.h3_masked_guide import *
 from .nodes.power_crop_image import *
 from .nodes.samplers_experimental import *
+from .nodes.frames import *
+from .nodes.masks import *
+from .nodes.groups import *
+from .nodes.seed import *
 
 
 # Import API endpoints to register routes
 from . import api
-from .utility.rgthree_api import routes_model_info
+from .utility.wanvid_api import routes_model_info
 from .nodes import trigger_ref_refresh  # Register PrepareRefs backend trigger endpoint
 
 NODE_CONFIG = {}
@@ -75,9 +79,12 @@ for name, obj in inspect.getmembers(current_module):
             is_comfy_node = is_old_style or is_new_style
             if is_comfy_node:
                 class_name = obj.__name__
+                # Allow a node to register under a different key (e.g. to avoid
+                # clashing with another pack that already uses the class name).
+                node_key = getattr(obj, 'NODE_KEY', class_name)
                 # Use explicit Node.DISPLAY_NAME if available, otherwise generate one
                 display_name = getattr(obj, 'DISPLAY_NAME', None) or to_display_name(class_name)
-                NODE_CONFIG[class_name] = {"class": obj, "name": display_name}
+                NODE_CONFIG[node_key] = {"class": obj, "name": display_name}
                 
 def generate_node_mappings(node_config):
     node_class_mappings = {}

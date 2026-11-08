@@ -113,7 +113,6 @@ export async function renameLoRAFiles(loraName, variant = 'high', refreshCallbac
         let responseText;
         try {
             responseText = await response.text();
-            console.log('Raw response:', responseText); // Debug log
             data = JSON.parse(responseText);
         } catch (parseError) {
             console.error('JSON parse error:', parseError);
@@ -131,12 +130,19 @@ export async function renameLoRAFiles(loraName, variant = 'high', refreshCallbac
                         widget.value.lora_name = data.new_low_path;
                     }
                 } else {
+                    // The displayed/serialized value is `lora` (not lora_name)
+                    widget.value.lora = data.new_high_path;
                     widget.value.lora_name = data.new_high_path;
                     // Also update low variant if it exists and is based on the high one
                     if (widget.value.is_low && widget.value.low_variant_name &&
                         widget.value.low_variant_name.includes(baseName)) {
                         widget.value.low_variant_name = data.new_low_path || data.new_high_path;
                     }
+                }
+
+                // Re-check low variant detection for the new name
+                if (typeof widget.checkLowLoraVariant === 'function') {
+                    widget.checkLowLoraVariant(widget.value.lora);
                 }
 
                 // Update the displayed name
@@ -151,34 +157,29 @@ export async function renameLoRAFiles(loraName, variant = 'high', refreshCallbac
             // Handle refresh callback (for picker dialog)
             if (refreshCallback) {
                 // Show success message in console and call refresh
-                console.log('LoRA renamed successfully:', data.message);
 
                 // Show a temporary success message instead of blocking alert
                 showTemporaryMessage(`✅ LoRA renamed to: ${finalNewName}.safetensors`, 'success');
 
                 try {
                     await refreshCallback();
-                    console.log('Refresh callback executed successfully');
                 } catch (refreshError) {
                     console.warn('Refresh callback failed:', refreshError);
                     showTemporaryMessage('⚠️ List may need manual refresh to see updated name', 'warning');
                 }
             } else if (!widget) {
                 // Show success message for non-widget, non-picker contexts
-                console.log('LoRA renamed successfully:', data.message);
                 showTemporaryMessage(`✅ LoRA renamed to: ${finalNewName}.safetensors`, 'success');
 
                 // If we have access to the dialog, refresh preview availability for blue dots
                 const dialog = document.querySelector('.lora-picker-dialog');
                 if (dialog && dialog.dialogInstance && dialog.dialogInstance.loadPreviewAvailability) {
                     try {
-                        console.log('Refreshing preview availability after rename...');
                         await dialog.dialogInstance.loadPreviewAvailability();
                         // Re-render list to update blue dots
                         if (dialog.dialogInstance.renderList) {
                             dialog.dialogInstance.renderList();
                         }
-                        console.log('Preview availability refreshed after rename');
                     } catch (previewError) {
                         console.warn('Failed to refresh preview availability after rename:', previewError);
                     }

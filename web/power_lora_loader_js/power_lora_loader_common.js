@@ -19,9 +19,10 @@
 
 import { app } from "../../../scripts/app.js";
 import {
-    RgthreeBaseWidget, RgthreeBetterButtonWidget, RgthreeDividerWidget,
+    QQBaseWidget, QQBetterButtonWidget, QQDividerWidget,
     StrengthCopyWidget, PowerLoraLoaderHeaderWidget, PowerLoraLoaderWidget,
     fitString, drawTogglePart, drawRoundedRectangle,
+    drawNumberWidgetPart, drawInfoIcon,
 } from "./widgets.js";
 import { LoraPickerDialog } from "./lora_picker_dialog.js";
 import { getLoraSlotInPosition, getLoraSlotMenuOptions } from "./lora_context_menu.js";
@@ -183,12 +184,166 @@ export class PowerLoraLoaderWidgetEx extends PowerLoraLoaderWidget {
         if (!strengthSplit) {
             // Single-strength mode: no Low strength hit area / interactions
             delete this.hitAreas.low_strength;
+            // Simple mode: no colored variant circle at the end of the row,
+            // so also remove its hit area (no variant menu on right-click there)
+            delete this.hitAreas.low_variant_icon;
+            // Simple mode extras (borrowed from qq's Power Lora Loader):
+            // "i" info badge next to the strength, and "<" / ">" steppers.
+            this.hitAreas.info = { bounds: [0, 0], onDown: this.onInfoDown };
+            this.hitAreas.strengthDec = { bounds: [0, 0], onDown: this.onStrengthDecDown };
+            this.hitAreas.strengthInc = { bounds: [0, 0], onDown: this.onStrengthIncDown };
+            // Drag-to-change area spanning the whole "< value >" part; the
+            // click-to-prompt popup only fires on the number itself (strength).
+            this.hitAreas.strengthAny = { bounds: [0, 0], onMove: this.onStrengthAnyMove };
         }
+    }
+
+    // --- Simple-mode only handlers (qq-style) ---
+
+    onInfoDown(event, pos, node) {
+        if (!this.value.lora || this.value.lora === "None") return;
+        this.cancelMouseDown();
+        this.showLoraInfoDialog('high');
+    }
+
+    onStrengthDecDown(event, pos, node) {
+        this.stepStrength(-1);
+        node.setDirtyCanvas(true, false);
+    }
+
+    onStrengthIncDown(event, pos, node) {
+        this.stepStrength(1);
+        node.setDirtyCanvas(true, false);
+    }
+
+    stepStrength(direction) {
+        const step = 0.05;
+        const strength = (this.value.strength ?? 1) + step * direction;
+        this.value.strength = Math.round(strength * 100) / 100;
+    }
+
+    // --- Drag-to-reorder (Shift + Left Click on the LoRA name) ---
+    // Mechanism ported from Power Spline Editor's layer widgets.
+
+    mouse(event, pos, node) {
+        // While a reorder drag is active, swallow move/up events so no hit
+        // areas (toggle, strength drag, lora chooser...) fire accidentally.
+        if (this._reorderDragActive) {
+            if (event.type === 'pointerup' || event.type === 'pointermove') {
+                return true;
+            }
+        }
+        // Shift + Left Click on the lora name => begin drag-to-reorder
+        if (event.type === 'pointerdown' && event.shiftKey && event.button === 0) {
+            if (this.clickWasWithinBounds(pos, this.hitAreas.lora.bounds)) {
+                this._beginLoraReorderDrag(event, node);
+                return true;
+            }
+        }
+        return super.mouse(event, pos, node);
+    }
+
+    _beginLoraReorderDrag(pointerDownEvent, node) {
+        const getLoras = () => node.widgets.filter(w => w.name?.startsWith("lora_"));
+        const loras = getLoras();
+        const startIndex = loras.indexOf(this);
+        if (startIndex < 0) return;
+
+        this._reorderDragActive = true;
+        this._reorderStartIndex = startIndex;
+        this._reorderTargetIndex = startIndex;
+        this._reorderStartClientY = pointerDownEvent.clientY;
+
+        // Cursor feedback
+        this._prevBodyCursor = document.body.style.cursor;
+        document.body.style.cursor = 'grabbing';
+        try { app.canvas.canvas.style.cursor = 'grabbing'; } catch {}
+
+        const onMove = (e) => {
+            if (!this._reorderDragActive) return;
+            const dy = (e.clientY - this._reorderStartClientY) || 0;
+            const step = Math.round(dy / (LiteGraph.NODE_WIDGET_HEIGHT || 24));
+            let idx = this._reorderStartIndex + step;
+            // Allow dropping after the last lora (idx === loras.length)
+            idx = Math.max(0, Math.min(loras.length, idx));
+            if (idx !== this._reorderTargetIndex) {
+                this._reorderTargetIndex = idx;
+            }
+            try { node.setDirtyCanvas(true, true); } catch {}
+        };
+        const onUp = () => {
+            document.removeEventListener('pointermove', onMove, true);
+            document.removeEventListener('pointerup', onUp, true);
+            // Restore cursor
+            try { app.canvas.canvas.style.cursor = ''; } catch {}
+            document.body.style.cursor = this._prevBodyCursor || '';
+
+            if (!this._reorderDragActive) return;
+            this._reorderDragActive = false;
+
+            const lorasNow = getLoras();
+            const from = lorasNow.indexOf(this);
+            const to = this._reorderTargetIndex ?? from;
+            if (from >= 0 && to >= 0 && from !== to) {
+                const widgets = node.widgets;
+                // Remove from current global position
+                widgets.splice(widgets.indexOf(this), 1);
+                if (to < lorasNow.length) {
+                    // Insert before the target lora widget
+                    const before = lorasNow[to];
+                    const targetGlobal = widgets.indexOf(before);
+                    widgets.splice(targetGlobal >= 0 ? targetGlobal : widgets.length, 0, this);
+                } else {
+                    // Insert after the last lora widget
+                    const afterRemoval = getLoras();
+                    const last = afterRemoval[afterRemoval.length - 1];
+                    const lastIdx = last ? widgets.indexOf(last) : -1;
+                    widgets.splice(lastIdx >= 0 ? lastIdx + 1 : widgets.length, 0, this);
+                }
+                try { node.setDirtyCanvas(true, true); } catch {}
+            }
+            this._reorderStartIndex = undefined;
+            this._reorderTargetIndex = undefined;
+            this._reorderStartClientY = undefined;
+        };
+
+        document.addEventListener('pointermove', onMove, true);
+        document.addEventListener('pointerup', onUp, true);
+    }
+
+    // Cyan insertion indicator line, drawn at the widget sitting at the
+    // current drop target index while a reorder drag is active.
+    _drawReorderIndicatorIfTarget(ctx, node, y, h) {
+        try {
+            const loras = node.widgets.filter(w => w.name?.startsWith("lora_"));
+            const dragging = loras.find(w => w && w._reorderDragActive);
+            if (!dragging) return;
+            const target = dragging._reorderTargetIndex ?? -1;
+            const myIndex = loras.indexOf(this);
+            const isLast = myIndex === loras.length - 1;
+            const showTopLine = myIndex === target && target < loras.length;
+            const showBottomLine = isLast && target === loras.length; // after-last sentinel
+            if (showTopLine || showBottomLine) {
+                ctx.save();
+                ctx.strokeStyle = '#2cc6ff';
+                ctx.globalAlpha = app.canvas.editor_alpha;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                const left = 10;
+                const right = node.size[0] - 10;
+                const lineY = showTopLine ? (y - 1) : (y + h - 1);
+                ctx.moveTo(left, lineY);
+                ctx.lineTo(right, lineY);
+                ctx.stroke();
+                ctx.restore();
+            }
+        } catch {}
     }
 
     draw(ctx, node, w, y, h) {
         if (this.strengthSplit) {
             super.draw(ctx, node, w, y, h);
+            this._drawReorderIndicatorIfTarget(ctx, node, y, h);
             return;
         }
 
@@ -202,38 +357,37 @@ export class PowerLoraLoaderWidgetEx extends PowerLoraLoaderWidget {
         this.hitAreas.toggle.bounds = drawTogglePart(ctx, [posX, y], h, this.value.on);
         posX += this.hitAreas.toggle.bounds[1] + MARGIN;
 
-        let rposX = w - MARGIN;
-        if (this.value.use_for_both) {
-            ctx.fillStyle = "#9370DB"; // Purple for "both" state
-        } else if (this.value.low_only) {
-            ctx.fillStyle = "#4169E1"; // Blue for "low only" state
-        } else if (this.value.high_only) {
-            ctx.fillStyle = "#DC143C"; // Red for "high only" state
-        } else if (this.value.is_low) {
-            ctx.fillStyle = this.value.low_active ? "lime" : "orange";
-        } else {
-            ctx.fillStyle = "#555";
-        }
-        ctx.beginPath();
-        ctx.arc(rposX - ICON_WIDTH / 2, y + h / 2, h * 0.2, 0, Math.PI * 2);
-        ctx.fill();
+        // Simple mode: no colored circle at the end of the row. Instead, from
+        // the right edge: "< strength >" stepper, then the "i" info badge
+        // (v2 keeps the circle + plain Low/High text values).
+        const innerMargin = MARGIN * 0.33;
+        const iconGap = 5; // extra breathing room
+        // right offset => spacing after the ">" arrow
+        let rposX = w - MARGIN - innerMargin - iconGap;
 
-        // Store the bounds for the low variant icon
-        this.hitAreas.low_variant_icon.bounds = [
-            rposX - ICON_WIDTH,
-            y,
-            ICON_WIDTH,
-            h
-        ];
-
-        rposX -= ICON_WIDTH + MARGIN;
-
-        this.hitAreas.strength.bounds = [rposX - STRENGTH_WIDTH, STRENGTH_WIDTH];
-        ctx.textAlign = "right";
+        // "< strength >" arrows. Clicking the number opens the prompt popup;
+        // the arrows only step the value (no popup). Dragging anywhere over
+        // the part changes the value.
         ctx.fillStyle = "white";
-        ctx.textBaseline = "middle";
-        ctx.fillText(this.value.strength.toFixed(2), rposX, y + h / 2);
-        rposX -= STRENGTH_WIDTH + MARGIN;
+        const [leftArrow, textBounds, rightArrow] = drawNumberWidgetPart(ctx, {
+            posX: rposX,
+            posY: y,
+            height: h,
+            value: this.value.strength ?? 1,
+            direction: -1,
+        });
+        this.hitAreas.strengthDec.bounds = leftArrow;
+        this.hitAreas.strengthInc.bounds = rightArrow;
+        this.hitAreas.strength.bounds = textBounds; // click => prompt popup
+        this.hitAreas.strengthAny.bounds = [leftArrow[0], rightArrow[0] + rightArrow[1] - leftArrow[0]]; // drag
+        // spacing after the "i" icon (gap between icon and stepper)
+        rposX = leftArrow[0] - innerMargin - iconGap;
+
+        // "i" info badge -> Show Info dialog (gray, not blue-outlined)
+        const infoIconSize = h * 0.66;
+        drawInfoIcon(ctx, rposX - infoIconSize, y + (h - infoIconSize) / 2, infoIconSize, "GRAYED");
+        this.hitAreas.info.bounds = [rposX - infoIconSize - innerMargin, infoIconSize + innerMargin * 2];
+        rposX -= infoIconSize + innerMargin * 2 + innerMargin;
 
         const loraWidth = rposX - posX;
         this.hitAreas.lora.bounds = [posX, loraWidth];
@@ -241,6 +395,7 @@ export class PowerLoraLoaderWidgetEx extends PowerLoraLoaderWidget {
         ctx.fillText(fitString(ctx, this.value.lora, loraWidth), posX, y + h / 2);
 
         ctx.globalAlpha = 1;
+        this._drawReorderIndicatorIfTarget(ctx, node, y, h);
     }
 }
 
@@ -393,10 +548,10 @@ export function createPowerLoraLoaderExtension(config) {
                 if (outputBoth || copyButtons) {
                     this.addCustomWidget(new StrengthCopyWidget(outputBoth, copyButtons));
                 }
-                this.addCustomWidget(new RgthreeDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
+                this.addCustomWidget(new QQDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
                 this.addCustomWidget(new PowerLoraLoaderHeaderWidgetEx(strengthSplit));
-                this.widgetButtonSpacer = this.addCustomWidget(new RgthreeDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
-                this.addCustomWidget(new RgthreeBetterButtonWidget("➕ Add Lora", (event, pos, node) => {
+                this.widgetButtonSpacer = this.addCustomWidget(new QQDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
+                this.addCustomWidget(new QQBetterButtonWidget("➕ Add Lora", (event, pos, node) => {
                     showPicker(event, (lora) => {
                         if (lora) {
                             this.addNewLoraWidget().setLora(lora);
@@ -592,12 +747,6 @@ export function createPowerLoraLoaderExtension(config) {
                                         // Re-run the low variant check with updated cache
                                         widget.checkLowLoraVariant(widget.value.lora);
 
-                                        // Log changes in low variant detection
-                                        if (oldIsLow !== widget.value.is_low || oldVariantName !== widget.value.low_variant_name) {
-                                            console.log(`[${logTag}] Low variant status changed for '${widget.value.lora}': ` +
-                                                      `${oldIsLow} -> ${widget.value.is_low}, ` +
-                                                      `variant: '${oldVariantName}' -> '${widget.value.low_variant_name}'`);
-                                        }
                                     }
 
                                     // Trigger a value change to update the UI
@@ -612,7 +761,6 @@ export function createPowerLoraLoaderExtension(config) {
                         }
                     });
 
-                    console.log(`[${logTag}] LoRA definitions refreshed - individual LoRA info available in dialogs`);
                 }).catch(error => {
                     console.error(`[${logTag}] Error refreshing LoRA list:`, error);
                 });

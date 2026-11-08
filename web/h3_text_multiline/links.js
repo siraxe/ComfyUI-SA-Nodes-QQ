@@ -351,8 +351,7 @@ function getComfyDefaultLinkColor(canvas) {
 function linkHighlighted(canvas, targetNode, sourceNode) {
     return Boolean(
         targetNode?.selected || sourceNode?.selected ||
-        canvas?.selectedItems?.has?.(targetNode) || canvas?.selectedItems?.has?.(sourceNode) ||
-        canvas?.selected_nodes?.[targetNode?.id] || canvas?.selected_nodes?.[sourceNode?.id]
+        canvas?.selectedItems?.has?.(targetNode) || canvas?.selectedItems?.has?.(sourceNode)
     );
 }
 

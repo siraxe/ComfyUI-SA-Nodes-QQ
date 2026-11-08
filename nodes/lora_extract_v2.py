@@ -379,7 +379,7 @@ class LoraExtractKJv2:
     RETURN_TYPES = ()
     FUNCTION = "save"
     OUTPUT_NODE = True
-    CATEGORY = "KJNodes/lora"
+    CATEGORY = "QQ/lora"
 
     def save(self, finetuned_model, original_model, filename_prefix, rank, lora_type, algorithm,
              lowrank_iters, output_dtype, bias_diff, adaptive_param, clamp_quantile,

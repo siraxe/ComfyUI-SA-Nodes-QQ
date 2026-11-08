@@ -19,9 +19,9 @@
  * the top-left corner of its video's region in the stitched output.
  */
 import { app } from '../../../scripts/app.js';
-import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
+import { QQBaseWidget } from '../power_spline_editor/drawing_utils.js';
 
-export class PowerCompareRowWidget extends RgthreeBaseWidget {
+export class PowerCompareRowWidget extends QQBaseWidget {
     constructor(name = "PowerCompareRow") {
         super(name);
         this.type = "custom";
