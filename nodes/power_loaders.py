@@ -642,6 +642,110 @@ class PowerLoraLoaderV2:
             # Clip connected, return model, model_low, and clip
             return (model, model_low, clip)
 
+class SimplePowerLoraLoader:
+    """Simplified Power Lora Loader V2: one strength per LoRA, single model output (no model_low)."""
+
+    def __init__(self):
+        self.properties = {}
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+            },
+            "optional": FlexibleOptionalInputType(type=any_type, data={
+                "clip": ("CLIP",),
+            }),
+            "hidden": {
+                "ui_state": ("STRING", {"default": "{}"}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    RETURN_NAMES = ("model", "clip")
+    FUNCTION = "load_loras"
+    CATEGORY = "WanVideoWrapper_QQ/utils"
+    DESCRIPTION = "Simple Power Lora Loader - apply multiple loras with a single strength each (no model_low support)"
+    OUTPUT_NODE = False
+
+    def load_loras(self, model=None, clip=None, **kwargs):
+        """Applies each enabled lora with a single strength to model (and clip)."""
+        # Check if clip is actually connected (from JavaScript hasClip property)
+        has_clip = getattr(self, 'hasClip', clip is not None)
+
+        from nodes import LoraLoader
+
+        # Collect LoRA information for summary printing
+        loras_summary = []
+
+        for key, value in kwargs.items():
+            if key.startswith('lora_') and isinstance(value, dict) and 'on' in value and 'lora' in value and 'strength' in value:
+                # Check if lora is enabled and has valid data
+                if not value['on']:
+                    continue
+
+                lora_name = value['lora']
+                if not lora_name or lora_name.lower() == "none":
+                    continue
+
+                # Use the sophisticated LoRA path resolution from rgthree-comfy
+                try:
+                    from rgthree_comfy.py.power_prompt_utils import get_lora_by_filename
+                    lora_filename = get_lora_by_filename(lora_name, log_node=self.__class__.__name__)
+                except ImportError:
+                    # Fallback to basic path resolution if rgthree-comfy is not available
+                    lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
+
+                if lora_filename is None:
+                    # Try to get the full path directly from ComfyUI as a fallback
+                    try:
+                        lora_path = folder_paths.get_full_path("loras", lora_name)
+                        if lora_path and os.path.exists(lora_path):
+                            lora_filename = os.path.basename(lora_name.replace('\\', '/'))
+                        else:
+                            print(f"[SimplePowerLoraLoader] LoRA file '{lora_name}' not found in loras folder.")
+                            continue
+                    except Exception as e:
+                        print(f"[SimplePowerLoraLoader] Error getting full path for '{lora_name}': {e}")
+                        continue
+
+                strength = value['strength']
+                strength = round(strength, 4) if not isinstance(strength, list) else strength
+
+                # Skip if strength is zero or None
+                if strength == 0.0 or strength is None:
+                    continue
+
+                # Apply the lora using ComfyUI's LoraLoader
+                try:
+                    if not has_clip:
+                        # No clip connected - act like LoraLoaderModelOnly
+                        if model is not None:
+                            model, _ = LoraLoader().load_lora(model, None, lora_filename, strength, 0)
+                    else:
+                        if model is not None:
+                            model, clip = LoraLoader().load_lora(model, clip, lora_filename, strength, strength)
+                except Exception as e:
+                    print(f"[SimplePowerLoraLoader] Error loading lora '{lora_name}': {e}")
+                    continue
+
+                loras_summary.append((strength, lora_filename))
+
+        # Print the summary
+        if loras_summary:
+            print("------------------------------")
+            print(" == LORAS :")
+            for strength, filename in loras_summary:
+                print(f"    {strength:.2f} - {filename}")
+            print("------------------------------")
+
+        # Return different tuples based on whether clip was connected
+        if not has_clip:
+            return (model,)
+        else:
+            return (model, clip)
+
 class CheckpointLoader_v2:
     """A power checkpoint loader v2 that provides PowerLoraLoaderV2-style UI for model checkpoints."""
 

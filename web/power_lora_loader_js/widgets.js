@@ -248,8 +248,10 @@ const ICON_WIDTH = 20;
 const MARGIN = 10;
 
 export class StrengthCopyWidget extends RgthreeBaseWidget {
-    constructor() {
+    constructor(showOutputBoth = true, showCopyButtons = true) {
         super("StrengthCopyWidget");
+        this.showOutputBoth = showOutputBoth;
+        this.showCopyButtons = showCopyButtons;
         this.value = {};
         this.hitAreas = {
             output_both_toggle: { bounds: [0, 0] },
@@ -272,38 +274,44 @@ export class StrengthCopyWidget extends RgthreeBaseWidget {
         const buttonSpacing = 36;
         const rightOffset = 25;
         const innerMargin = 8;
+        const toggleSpacing = 15; // Extra spacing between toggle and buttons
 
         // Calculated values
         const midY = posY + height * 0.5;
-        const totalButtonsWidth = (buttonWidth * 2) + buttonSpacing;
+        const totalButtonsWidth = this.showCopyButtons ? (buttonWidth * 2) + buttonSpacing : 0;
 
         ctx.save();
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillStyle = LiteGraph.WIDGET_TEXT_COLOR;
 
+        // Draw ">" button (high to low) and "<" button (low to high)
+        if (this.showCopyButtons) {
+            const rightX = w - margin - totalButtonsWidth - rightOffset;
+            const highToLowX = rightX;
+            drawWidgetButton(ctx, [highToLowX, posY], [buttonWidth, buttonHeight], ">", this.highToLowPressed);
+            this.hitAreas['high_to_low_button'].bounds = [highToLowX, buttonWidth];
+
+            const lowToHighX = rightX + buttonWidth + buttonSpacing;
+            drawWidgetButton(ctx, [lowToHighX, posY], [buttonWidth, buttonHeight], "<", this.lowToHighPressed);
+            this.hitAreas['low_to_high_button'].bounds = [lowToHighX, buttonWidth];
+        } else {
+            this.hitAreas['high_to_low_button'].bounds = [0, 0];
+            this.hitAreas['low_to_high_button'].bounds = [0, 0];
+        }
+
         // Draw "Output both" toggle
-        const toggleSpacing = 15; // Extra spacing between toggle and buttons
-        let posX = w - margin - totalButtonsWidth - rightOffset - toggleSpacing;
-        const outputBothValue = node.properties['output_both'] || false;
-        // Draw label and toggle from right to left
-        const toggleBounds = drawTogglePart(ctx, [posX - height * 1.5, posY], height, outputBothValue);
-        this.hitAreas['output_both_toggle'].bounds = toggleBounds;
-        const labelText = "Output both";
-        ctx.fillText(labelText, posX - height * 1.5 - ctx.measureText(labelText).width - innerMargin, midY);
-
-        // Adjust rightX for buttons (they stay in same position)
-        const rightX = w - margin - totalButtonsWidth - rightOffset;
-
-        // Draw ">" button (high to low)
-        const highToLowX = rightX;
-        drawWidgetButton(ctx, [highToLowX, posY], [buttonWidth, buttonHeight], ">", this.highToLowPressed);
-        this.hitAreas['high_to_low_button'].bounds = [highToLowX, buttonWidth];
-
-        // Draw "<" button (low to high)
-        const lowToHighX = rightX + buttonWidth + buttonSpacing;
-        drawWidgetButton(ctx, [lowToHighX, posY], [buttonWidth, buttonHeight], "<", this.lowToHighPressed);
-        this.hitAreas['low_to_high_button'].bounds = [lowToHighX, buttonWidth];
+        if (this.showOutputBoth) {
+            let posX = w - margin - totalButtonsWidth - rightOffset - toggleSpacing;
+            const outputBothValue = node.properties['output_both'] || false;
+            // Draw label and toggle from right to left
+            const toggleBounds = drawTogglePart(ctx, [posX - height * 1.5, posY], height, outputBothValue);
+            this.hitAreas['output_both_toggle'].bounds = toggleBounds;
+            const labelText = "Output both";
+            ctx.fillText(labelText, posX - height * 1.5 - ctx.measureText(labelText).width - innerMargin, midY);
+        } else {
+            this.hitAreas['output_both_toggle'].bounds = [0, 0];
+        }
 
         ctx.restore();
     }
