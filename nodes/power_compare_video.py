@@ -90,7 +90,7 @@ class PowerCompareVideo:
     """
     Playback preview node: receives an IMAGE batch (video frames) and sends
     them to the client UI for timeline-based playback with a sliding A/B
-    comparison (rgthree Image Comparer style).
+    comparison (Image Comparer style).
 
     Inputs:
         images   - IMAGE tensor [frame_count, height, width, 3] (e.g. from PowerLoadVideo).

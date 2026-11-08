@@ -1,7 +1,7 @@
 
 import { app } from "../../../scripts/app.js";
-import { rgthree } from "../rgthree/common/rgthree.js";
-import { RgthreeBetterButtonWidget, RgthreeDividerWidget, CombinedOptionsWidget, PowerLoraLoaderHeaderWidget, PowerLoraLoaderWidget } from "./widgets.js";
+import { qq } from "../qq_lib/common/qq.js";
+import { QQBetterButtonWidget, QQDividerWidget, CombinedOptionsWidget, PowerLoraLoaderHeaderWidget, PowerLoraLoaderWidget } from "./widgets.js";
 import { LoraPickerDialog } from "./lora_picker_dialog.js";
 import { getLoraSlotInPosition, getLoraSlotMenuOptions } from "./lora_context_menu.js";
 import { modelDataManager, UIManager } from "./pull_info.js";
@@ -51,19 +51,15 @@ function showLoraPicker(event, callback, node = null) {
             refreshCallback: async () => {
                 // Perform actual refresh of the LoRA list using unified system
                 try {
-                    console.log('[WanVideoPowerLoraLoader] Refreshing LoRA list...');
                     const freshLoras = await getLoras(true);
                     dialog.updateLoras(freshLoras);
 
                     // Also refresh preview availability for blue dots using unified system
-                    console.log('[WanVideoPowerLoraLoader] Refreshing preview availability...');
                     await modelDataManager.getPreviewAvailability('loras');
 
                     // Re-render the list to show updated blue dots
-                    console.log('[WanVideoPowerLoraLoader] Re-rendering list to show updated blue dots...');
                     dialog.renderList();
 
-                    console.log('[WanVideoPowerLoraLoader] LoRA list refreshed successfully');
                 } catch (error) {
                     console.error('[WanVideoPowerLoraLoader] Error refreshing LoRA list:', error);
                 }
@@ -159,10 +155,10 @@ app.registerExtension({
 
             nodeType.prototype.addNonLoraWidgets = function () {
                 this.addCustomWidget(new CombinedOptionsWidget());
-                this.addCustomWidget(new RgthreeDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
+                this.addCustomWidget(new QQDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
                 this.addCustomWidget(new PowerLoraLoaderHeaderWidget());
-                this.widgetButtonSpacer = this.addCustomWidget(new RgthreeDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
-                this.addCustomWidget(new RgthreeBetterButtonWidget("➕ Add Lora", (event, pos, node) => {
+                this.widgetButtonSpacer = this.addCustomWidget(new QQDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
+                this.addCustomWidget(new QQBetterButtonWidget("➕ Add Lora", (event, pos, node) => {
                     showLoraPicker(event, (lora) => {
                         if (lora) {
                             this.addNewLoraWidget().setLora(lora);
@@ -328,12 +324,6 @@ app.registerExtension({
                                         // Re-run the low variant check with updated cache
                                         widget.checkLowLoraVariant(widget.value.lora);
 
-                                        // Log changes in low variant detection
-                                        if (oldIsLow !== widget.value.is_low || oldVariantName !== widget.value.low_variant_name) {
-                                            console.log(`[WanVideoPowerLoraLoader] Low variant status changed for '${widget.value.lora}': ` +
-                                                      `${oldIsLow} -> ${widget.value.is_low}, ` +
-                                                      `variant: '${oldVariantName}' -> '${widget.value.low_variant_name}'`);
-                                        }
                                     }
 
                                     // Trigger a value change to update the UI
@@ -348,7 +338,6 @@ app.registerExtension({
                         }
                     });
 
-                    console.log('[WanVideoPowerLoraLoader] LoRA definitions refreshed - individual LoRA info available in dialogs');
                 }).catch(error => {
                     console.error('[WanVideoPowerLoraLoader] Error refreshing LoRA list:', error);
                 });

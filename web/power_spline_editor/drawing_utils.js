@@ -183,7 +183,7 @@ export function drawNumberWidgetPart(ctx, options) {
 drawNumberWidgetPart.WIDTH_TOTAL = 9 + 3 + 32 + 3 + 9;
 
 // === BASE WIDGET CLASS ===
-export class RgthreeBaseWidget {
+export class QQBaseWidget {
     constructor(name) {
         this.type = "custom";
         this.options = {};

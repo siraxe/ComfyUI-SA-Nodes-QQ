@@ -1,7 +1,4 @@
-// Enhanced rgthree implementation for WanVideoWrapper QQ
-// Provides proper toast messages and development utilities
-
-export const rgthree = {
+export const qq = {
     showMessage: function(options) {
         if (typeof options === 'string') {
             // If it's just a string, convert to options object

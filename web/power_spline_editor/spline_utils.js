@@ -16,7 +16,7 @@ import {
     drawWidgetButton,
     drawTogglePart,
     drawNumberWidgetPart,
-    RgthreeBaseWidget
+    QQBaseWidget
 } from './drawing_utils.js';
 
 // Re-export for convenience
@@ -35,7 +35,7 @@ export {
     drawWidgetButton,
     drawTogglePart,
     drawNumberWidgetPart,
-    RgthreeBaseWidget
+    QQBaseWidget
 };
 
 /**
@@ -200,7 +200,7 @@ export const create_documentation_stylesheet = () => {
   }
 
 // === DIMENSIONS WIDGET (Simplified version for backward compatibility) ===
-export class DimensionsWidget extends RgthreeBaseWidget {
+export class DimensionsWidget extends QQBaseWidget {
     constructor(name = "DimensionsWidget") {
         super(name);
         this.type = "custom";
@@ -321,7 +321,7 @@ export class DimensionsWidget extends RgthreeBaseWidget {
 }
 
 // === INTERPOLATION WIDGET ===
-export class InterpolationWidget extends RgthreeBaseWidget {
+export class InterpolationWidget extends QQBaseWidget {
     constructor(name = "InterpolationWidget") {
         super(name);
         this.type = "custom";
@@ -437,7 +437,7 @@ export class InterpolationWidget extends RgthreeBaseWidget {
 }
 
 // === DRIVER ROTATION & D_SCALE WIDGET (Combined driver_rotation and driver_d_scale) ===
-export class DriverRotationDScaleWidget extends RgthreeBaseWidget {
+export class DriverRotationDScaleWidget extends QQBaseWidget {
     constructor(name = "DriverRotationDScaleWidget") {
         super(name);
         this.type = "custom";
@@ -624,7 +624,7 @@ export class DriverRotationDScaleWidget extends RgthreeBaseWidget {
 }
 
 // === PAUSE WIDGET (Combined start_pause and end_pause) ===
-export class PauseWidget extends RgthreeBaseWidget {
+export class PauseWidget extends QQBaseWidget {
     constructor(name = "PauseWidget") {
         super(name);
         this.type = "custom";
@@ -812,7 +812,7 @@ export class PauseWidget extends RgthreeBaseWidget {
 }
 
 // === OFFSET REPEAT WIDGET (Combined offset and repeat) ===
-export class OffsetRepeatWidget extends RgthreeBaseWidget {
+export class OffsetRepeatWidget extends QQBaseWidget {
     constructor(name = "OffsetRepeatWidget") {
         super(name);
         this.type = "custom";

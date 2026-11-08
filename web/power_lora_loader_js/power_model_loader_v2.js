@@ -1,6 +1,6 @@
 import { app } from "../../../scripts/app.js";
-import { rgthree } from "../rgthree/common/rgthree.js";
-import { RgthreeBetterButtonWidget, RgthreeDividerWidget, RgthreeBaseWidget } from "./widgets.js";
+import { qq } from "../qq_lib/common/qq.js";
+import { QQBetterButtonWidget, QQDividerWidget, QQBaseWidget } from "./widgets.js";
 import { drawRoundedRectangle, drawTogglePart, drawWidgetButton, fitString, isLowQuality } from "./widgets.js";
 import { LoraPickerDialog } from "./lora_picker_dialog.js";
 import { WanLoraInfoDialog } from "./dialog_info.js";
@@ -52,7 +52,7 @@ function loadEyeRefreshState() {
 
 
 // Custom widget for model selection
-class PowerModelLoaderWidget extends RgthreeBaseWidget {
+class PowerModelLoaderWidget extends QQBaseWidget {
     constructor(name, showModelChooser) {
         super(name);
         this.showModelChooser = showModelChooser;
@@ -420,7 +420,7 @@ app.registerExtension({
             };
 
             nodeType.prototype.addNonModelWidgets = function () {
-                this.addCustomWidget(new RgthreeDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
+                this.addCustomWidget(new QQDividerWidget({ marginTop: 4, marginBottom: 0, thickness: 0 }));
 
                 // Add hidden widget for UI state persistence
                 const uiStateWidget = this.addWidget("string", "ui_state", "{}", () => {},

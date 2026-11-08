@@ -1,4 +1,4 @@
-class RgthreeApi {
+class QQApi {
     constructor(baseUrl) {
         this.getCheckpointsPromise = null;
         this.getSamplersPromise = null;
@@ -38,7 +38,7 @@ class RgthreeApi {
     async postJson(route, json) {
         const body = new FormData();
         body.append("json", JSON.stringify(json));
-        return await rgthreeApi.fetchJson(route, { method: "POST", body });
+        return await vidApi.fetchJson(route, { method: "POST", body });
     }
     getLoras(force = false) {
         if (!this.getLorasPromise || force) {
@@ -168,4 +168,4 @@ class RgthreeApi {
         return fetch(url, options);
     }
 }
-export const rgthreeApi = new RgthreeApi();
+export const vidApi = new QQApi();

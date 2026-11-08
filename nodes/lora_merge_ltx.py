@@ -46,7 +46,7 @@ class LoadModelMeta:
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_checkpoint"
-    CATEGORY = "KJNodes/ltxv"
+    CATEGORY = "QQ/ltxv"
 
     def load_checkpoint(self, checkpoint_name):
         """
@@ -156,7 +156,7 @@ class LTX2LoRASelect:
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply_lora"
-    CATEGORY = "KJNodes/ltxv"
+    CATEGORY = "QQ/ltxv"
 
     def apply_lora(
         self,
@@ -357,7 +357,7 @@ class LoraMergeLTX:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("merged_lora_path",)
     FUNCTION = "merge_loras"
-    CATEGORY = "KJNodes/ltxv"
+    CATEGORY = "QQ/ltxv"
     OUTPUT_NODE = True
 
     def merge_loras(self, model_with_loras, output_prefix, rank, output_dir, merge_on_model):
@@ -622,7 +622,7 @@ class LoraApplyOnLTX:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("saved_checkpoint_path",)
     FUNCTION = "apply_lora_to_model"
-    CATEGORY = "KJNodes/ltxv"
+    CATEGORY = "QQ/ltxv"
     OUTPUT_NODE = True
 
     def apply_lora_to_model(self, model_with_loras, output_prefix, output_dir):

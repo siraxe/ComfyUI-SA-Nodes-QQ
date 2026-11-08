@@ -447,11 +447,24 @@ async def rename_lora(request) -> web.Response:
             if os.path.exists(preview_folder):
                 renamed_files.extend(_rename_preview_files(old_base_name, new_name, preview_folder))
 
+        # Compute the ComfyUI-relative name (e.g. "subdir/name.safetensors") for
+        # UI use - widgets store partial paths, not full filesystem paths.
+        new_relative_path = new_lora_path
+        for folder in folders_to_check:
+            try:
+                rel = os.path.relpath(new_lora_path, folder)
+                if not rel.startswith('..'):
+                    new_relative_path = rel.replace(os.sep, '/')
+                    break
+            except ValueError:
+                # Different drive letters on Windows, skip this folder
+                continue
+
         return web.json_response({
             "success": True,
             "message": f"Successfully renamed LoRA and {len(renamed_files)-1} associated files",
-            "new_high_path": new_lora_path,
-            "new_low_path": new_lora_path,  # For high variant, low path is the same
+            "new_high_path": new_relative_path,
+            "new_low_path": new_relative_path,  # For high variant, low path is the same
             "renamed_files": renamed_files
         })
 

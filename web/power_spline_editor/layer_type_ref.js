@@ -1,8 +1,8 @@
 // Simple reference layer widget
-import { RgthreeBaseWidget, drawRoundedRectangle } from './drawing_utils.js';
+import { QQBaseWidget, drawRoundedRectangle } from './drawing_utils.js';
 import { app } from '../../../scripts/app.js';
 
-export class RefLayerWidget extends RgthreeBaseWidget {
+export class RefLayerWidget extends QQBaseWidget {
     constructor(name) {
         super(name);
         this.type = "custom";

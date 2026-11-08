@@ -7,7 +7,7 @@
  *
  * When a second video is available (previous run's cache, or the images_b
  * input), the row above the playback area offers three compare modes:
- *   - slide (default): rgthree-Image-Comparer-style slider on the playback
+ *   - slide (default): Image-Comparer-style slider on the playback
  *     area - the divider follows the mouse, revealing B on the left and
  *     keeping A on the right
  *   - right: B placed on the right side of A
@@ -290,7 +290,7 @@ app.registerExtension({
             };
 
             // Left-to-right sliding compare: the divider follows the mouse while
-            // it moves over the playback area (borrowed from rgthree comparer).
+            // it moves over the playback area (borrowed from qq comparer).
             // Only active in slide mode with a second video present.
             const updateSplitFromMouse = (e) => {
                 if ((this.compareMode || 'slide') !== 'slide') return;

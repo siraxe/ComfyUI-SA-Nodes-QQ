@@ -2,8 +2,6 @@
 import { app } from "../../../scripts/app.js";
 import { loraPatternMatcher } from "./lora_pattern_matcher.js";
 
-// From rgthree/src_web/comfyui/utils_canvas.ts
-
 export function fitString(ctx, str, maxWidth) {
     let width = ctx.measureText(str).width;
     const ellipsis = "…";
@@ -83,9 +81,81 @@ export function drawWidgetButton(ctx, pos, size, text, isMouseDownedAndOver) {
     ctx.restore();
 }
 
-// From rgthree/src_web/comfyui/utils_widgets.ts
+// arrows. direction = -1 lays it out right-to-left (grows leftwards from posX).
+// Returns [leftArrow, number, rightArrow] hit-area bounds.
+export function drawNumberWidgetPart(ctx, options) {
+    const arrowWidth = 9;
+    const arrowHeight = 10;
+    const innerMargin = 3;
+    const numberWidth = 32;
+    const xBoundsArrowLess = [0, 0];
+    const xBoundsNumber = [0, 0];
+    const xBoundsArrowMore = [0, 0];
+    ctx.save();
+    let posX = options.posX;
+    const { posY, height, value, textColor } = options;
+    const midY = posY + height / 2;
+    if (options.direction === -1) {
+        posX = posX - arrowWidth - innerMargin - numberWidth - innerMargin - arrowWidth;
+    }
+    ctx.fill(new Path2D(`M ${posX} ${midY} l ${arrowWidth} ${arrowHeight / 2} l 0 -${arrowHeight} L ${posX} ${midY} z`));
+    xBoundsArrowLess[0] = posX;
+    xBoundsArrowLess[1] = arrowWidth;
+    posX += arrowWidth + innerMargin;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const oldTextColor = ctx.fillStyle;
+    if (textColor) {
+        ctx.fillStyle = textColor;
+    }
+    ctx.fillText(fitString(ctx, value.toFixed(2), numberWidth), posX + numberWidth / 2, midY);
+    ctx.fillStyle = oldTextColor;
+    xBoundsNumber[0] = posX;
+    xBoundsNumber[1] = numberWidth;
+    posX += numberWidth + innerMargin;
+    ctx.fill(new Path2D(`M ${posX} ${midY - arrowHeight / 2} l ${arrowWidth} ${arrowHeight / 2} l -${arrowWidth} ${arrowHeight / 2} v -${arrowHeight} z`));
+    xBoundsArrowMore[0] = posX;
+    xBoundsArrowMore[1] = arrowWidth;
+    ctx.restore();
+    return [xBoundsArrowLess, xBoundsNumber, xBoundsArrowMore];
+}
+drawNumberWidgetPart.WIDTH_TOTAL = 9 + 3 + 32 + 3 + 9;
 
-export class RgthreeBaseWidget {
+
+export function drawInfoIcon(ctx, x, y, size = 12, treatment = 'GRAYED') {
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, size, size, [size * 0.1]);
+    if (treatment === 'GRAYED') {
+        ctx.fillStyle = "#aaa";
+        ctx.strokeStyle = "#aaa";
+    } else {
+        ctx.fillStyle = "#2f82ec";
+        ctx.strokeStyle = "#2f82ec";
+    }
+    if (treatment === 'FILLED') {
+        ctx.fill();
+    } else {
+        ctx.stroke();
+    }
+    ctx.strokeStyle = "#FFF";
+    ctx.lineWidth = 2;
+    const midX = x + size / 2;
+    const serifSize = size * 0.175;
+    ctx.stroke(new Path2D(`
+    M ${midX} ${y + size * 0.15}
+    v 2
+    M ${midX - serifSize} ${y + size * 0.45}
+    h ${serifSize}
+    v ${size * 0.325}
+    h ${serifSize}
+    h -${serifSize * 2}
+  `));
+    ctx.restore();
+}
+
+
+export class QQBaseWidget {
     constructor(name) {
         this.name = name;
         this.type = "custom";
@@ -195,7 +265,7 @@ export class RgthreeBaseWidget {
     onMouseMove(event, pos, node) { return true; }
 }
 
-export class RgthreeBetterButtonWidget extends RgthreeBaseWidget {
+export class QQBetterButtonWidget extends QQBaseWidget {
     constructor(name, callback, label) {
         super(name);
         this.callback = callback;
@@ -212,7 +282,7 @@ export class RgthreeBetterButtonWidget extends RgthreeBaseWidget {
     }
 }
 
-export class RgthreeDividerWidget extends RgthreeBaseWidget {
+export class QQDividerWidget extends QQBaseWidget {
     constructor(options) {
         super("divider");
         this.value = {};
@@ -247,7 +317,7 @@ const STRENGTH_WIDTH = 60;
 const ICON_WIDTH = 20;
 const MARGIN = 10;
 
-export class StrengthCopyWidget extends RgthreeBaseWidget {
+export class StrengthCopyWidget extends QQBaseWidget {
     constructor(showOutputBoth = true, showCopyButtons = true) {
         super("StrengthCopyWidget");
         this.showOutputBoth = showOutputBoth;
@@ -397,7 +467,7 @@ export class StrengthCopyWidget extends RgthreeBaseWidget {
     }
 }
 
-export class CombinedOptionsWidget extends RgthreeBaseWidget {
+export class CombinedOptionsWidget extends QQBaseWidget {
     constructor() {
         super("CombinedOptionsWidget");
         this.value = {};
@@ -609,7 +679,7 @@ export class CombinedOptionsWidget extends RgthreeBaseWidget {
     }
 }
 
-export class PowerLoraLoaderHeaderWidget extends RgthreeBaseWidget {
+export class PowerLoraLoaderHeaderWidget extends QQBaseWidget {
     constructor() {
         super("PowerLoraLoaderHeaderWidget");
         this.value = { type: "PowerLoraLoaderHeaderWidget" };
@@ -645,7 +715,7 @@ export class PowerLoraLoaderHeaderWidget extends RgthreeBaseWidget {
     }
 }
 
-export class PowerLoraLoaderWidget extends RgthreeBaseWidget {
+export class PowerLoraLoaderWidget extends QQBaseWidget {
     constructor(name, showLoraChooser) {
         super(name);
         this.showLoraChooser = showLoraChooser;
@@ -657,6 +727,7 @@ export class PowerLoraLoaderWidget extends RgthreeBaseWidget {
             strength: { bounds: [0, 0], onClick: this.onStrengthClick, onMove: this.onStrengthAnyMove },
             low_strength: { bounds: [0, 0], onClick: this.onLowStrengthClick, onMove: this.onLowStrengthAnyMove },
             low_variant_icon: { bounds: [0, 0] },
+            info: { bounds: [0, 0], onDown: this.onInfoDown },
         };
     }
 
@@ -743,6 +814,12 @@ export class PowerLoraLoaderWidget extends RgthreeBaseWidget {
         ctx.fillText(this.value.strength.toFixed(2), rposX, y + h / 2);
         rposX -= STRENGTH_WIDTH + MARGIN;
 
+        // "i" info badge before (left of) the High strength value.
+        const infoIconSize = h * 0.66;
+        drawInfoIcon(ctx, rposX - infoIconSize, y + (h - infoIconSize) / 2, infoIconSize, "GRAYED");
+        this.hitAreas.info.bounds = [rposX - infoIconSize - MARGIN * 0.33, infoIconSize + MARGIN * 0.66];
+        rposX -= infoIconSize + MARGIN * 0.66 + MARGIN * 0.33;
+
         const loraWidth = rposX - posX;
         this.hitAreas.lora.bounds = [posX, loraWidth];
         ctx.textAlign = "left";
@@ -756,6 +833,12 @@ export class PowerLoraLoaderWidget extends RgthreeBaseWidget {
         this.cancelMouseDown();
         node.setDirtyCanvas(true, true);
         return true;
+    }
+
+    onInfoDown(event, pos, node) {
+        if (!this.value.lora || this.value.lora === "None") return;
+        this.cancelMouseDown();
+        this.showLoraInfoDialog('high');
     }
 
     setLora(lora) {
@@ -848,11 +931,9 @@ export class PowerLoraLoaderWidget extends RgthreeBaseWidget {
             const infoDialog = new WanLoraInfoDialog(loraToShow).show();
             // Store the item type for use in preview generation (this is for LoRA widgets)
             infoDialog.itemType = 'loras';
-            console.log(`[Widgets Debug] Created LoRA widget dialog with itemType: ${infoDialog.itemType}`);
             infoDialog.addEventListener("close", ((e) => {
                 if (e.detail.dirty) {
                     // Dialog was modified, could trigger refresh if needed
-                    console.log("LoRA info was modified");
                 }
             }));
         }).catch(error => {

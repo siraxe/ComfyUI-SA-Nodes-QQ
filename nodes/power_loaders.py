@@ -59,7 +59,7 @@ any_type = AnyType("*")
 
 
 def get_lora_by_filename_basic(file_path, lora_paths=None, log_node=None):
-    """Basic implementation of LoRA path resolution based on rgthree-comfy's get_lora_by_filename."""
+    """Basic LoRA path resolution helper."""
     if lora_paths is None:
         lora_paths = folder_paths.get_filename_list("loras")
     
@@ -124,7 +124,7 @@ def get_lora_by_filename_basic(file_path, lora_paths=None, log_node=None):
 
 
 class WanVideoPowerLoraLoader:
-    """A power lora loader for WanVideo that supports unlimited loras with rgthree-style UI."""
+    """A power lora loader for WanVideo that supports unlimited loras with a custom-styled UI."""
 
     def __init__(self):
         self.properties = {
@@ -150,7 +150,7 @@ class WanVideoPowerLoraLoader:
     RETURN_NAMES = ("selected_lora", "low_lora")
     FUNCTION = "load_loras"
     CATEGORY = "WanVideoWrapper_QQ/utils"
-    DESCRIPTION = "A powerful, flexible node to load multiple WanVideo loras with rgthree-style UI"
+    DESCRIPTION = "A powerful, flexible node to load multiple WanVideo loras with a custom-styled UI"
 
     def load_loras(self, prev_lora=None, blocks=None, **kwargs):
         """Loops over the provided loras in kwargs and applies valid ones."""
@@ -188,13 +188,7 @@ class WanVideoPowerLoraLoader:
                 if not lora_name or lora_name.lower() == "none":
                     continue
                 
-                # Use the sophisticated LoRA path resolution from rgthree-comfy
-                try:
-                    from rgthree_comfy.py.power_prompt_utils import get_lora_by_filename
-                    lora_filename = get_lora_by_filename(lora_name, log_node=self.__class__.__name__)
-                except ImportError:
-                    # Fallback to basic path resolution if rgthree-comfy is not available
-                    lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
+                lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
                 
                 if lora_filename is None:
                     print(f"[WanVideoPowerLoraLoader] LoRA '{lora_name}' not found, skipping.")
@@ -314,13 +308,7 @@ class WanVideoPowerLoraLoader:
                             if low_strength is None:
                                 low_strength = 0.0
 
-                            # Use the sophisticated LoRA path resolution for low variant
-                            try:
-                                from rgthree_comfy.py.power_prompt_utils import get_lora_by_filename
-                                low_variant_filename = get_lora_by_filename(low_variant_name, log_node=self.__class__.__name__)
-                            except ImportError:
-                                # Fallback to basic path resolution if rgthree-comfy is not available
-                                low_variant_filename = get_lora_by_filename_basic(low_variant_name, log_node=self.__class__.__name__)
+                            low_variant_filename = get_lora_by_filename_basic(low_variant_name, log_node=self.__class__.__name__)
 
                             if low_variant_filename is None:
                                 print(f"[WanVideoPowerLoraLoader] Low variant LoRA '{low_variant_name}' not found, skipping low variant.")
@@ -426,13 +414,7 @@ class PowerLoraLoaderV2:
                 if not lora_name or lora_name.lower() == "none":
                     continue
                 
-                # Use the sophisticated LoRA path resolution from rgthree-comfy
-                try:
-                    from rgthree_comfy.py.power_prompt_utils import get_lora_by_filename
-                    lora_filename = get_lora_by_filename(lora_name, log_node=self.__class__.__name__)
-                except ImportError:
-                    # Fallback to basic path resolution if rgthree-comfy is not available
-                    lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
+                lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
                 
                 if lora_filename is None:
                     # Try to get the full path directly from ComfyUI as a fallback
@@ -573,13 +555,7 @@ class PowerLoraLoaderV2:
                     if low_strength is None:
                         low_strength = 0.0
                     
-                    # Use the sophisticated LoRA path resolution for low variant
-                    try:
-                        from rgthree_comfy.py.power_prompt_utils import get_lora_by_filename
-                        low_variant_filename = get_lora_by_filename(low_variant_name, log_node=self.__class__.__name__)
-                    except ImportError:
-                        # Fallback to basic path resolution if rgthree-comfy is not available
-                        low_variant_filename = get_lora_by_filename_basic(low_variant_name, log_node=self.__class__.__name__)
+                    low_variant_filename = get_lora_by_filename_basic(low_variant_name, log_node=self.__class__.__name__)
                     
                     if low_variant_filename is None:
                         print(f"[PowerLoraLoaderV2] Low variant LoRA '{low_variant_name}' not found, skipping low variant.")
@@ -689,13 +665,7 @@ class SimplePowerLoraLoader:
                 if not lora_name or lora_name.lower() == "none":
                     continue
 
-                # Use the sophisticated LoRA path resolution from rgthree-comfy
-                try:
-                    from rgthree_comfy.py.power_prompt_utils import get_lora_by_filename
-                    lora_filename = get_lora_by_filename(lora_name, log_node=self.__class__.__name__)
-                except ImportError:
-                    # Fallback to basic path resolution if rgthree-comfy is not available
-                    lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
+                lora_filename = get_lora_by_filename_basic(lora_name, log_node=self.__class__.__name__)
 
                 if lora_filename is None:
                     # Try to get the full path directly from ComfyUI as a fallback

@@ -3,7 +3,7 @@
  * Handles image extraction, scaling, and preview generation for LoRA files
  */
 
-import { rgthreeApi } from "./rgthree_api.js";
+import { vidApi } from "./wanvid_api.js";
 
 /**
  * Convert external Civitai image URLs to proxy URLs to avoid CSP violations

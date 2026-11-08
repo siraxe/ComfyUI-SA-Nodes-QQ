@@ -7,9 +7,9 @@
  */
 import { api } from '../../../scripts/api.js';
 import { app } from '../../../scripts/app.js';
-import { RgthreeBaseWidget, fitString } from '../power_spline_editor/drawing_utils.js';
+import { QQBaseWidget, fitString } from '../power_spline_editor/drawing_utils.js';
 
-export class PowerLoadVideoFileSelectorWidget extends RgthreeBaseWidget {
+export class PowerLoadVideoFileSelectorWidget extends QQBaseWidget {
     constructor(node) {
         super("PowerLoadVideoFileSelector");
         this.type = "custom";

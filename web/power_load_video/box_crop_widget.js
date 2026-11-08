@@ -7,9 +7,9 @@
  */
 
 import { app } from '../../../scripts/app.js';
-import { RgthreeBaseWidget } from '../power_spline_editor/drawing_utils.js';
+import { QQBaseWidget } from '../power_spline_editor/drawing_utils.js';
 
-export class BoxCropWidget extends RgthreeBaseWidget {
+export class BoxCropWidget extends QQBaseWidget {
     constructor(name = "box_crop") {
         super(name);
         this.type = 'custom';

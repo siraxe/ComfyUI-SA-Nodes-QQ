@@ -1,12 +1,12 @@
 // Button bar widget for adding layers (Add Spline, Add Keyframes, Draw, Duplicate)
-import { RgthreeBaseWidget, drawWidgetButton } from './drawing_utils.js';
+import { QQBaseWidget, drawWidgetButton } from './drawing_utils.js';
 
 /**
  * Creates a button bar widget with Add Spline, Add Keyframes, Draw, and Duplicate buttons
- * @returns {RgthreeBaseWidget} The configured button bar widget
+ * @returns {QQBaseWidget} The configured button bar widget
  */
 export function createButtonBarWidget() {
-    const buttonBarWidget = new RgthreeBaseWidget("button_bar");
+    const buttonBarWidget = new QQBaseWidget("button_bar");
     buttonBarWidget.type = "custom";
     buttonBarWidget.serialize = false;
 

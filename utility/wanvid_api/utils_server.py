@@ -25,12 +25,12 @@ def is_param_truthy(request, param):
 def set_default_page_resources(path, routes):
   """ Sets up routes for handling static files under a path."""
 
-  @routes.get(f'/rgthree/{path}/{{file}}')
+  @routes.get(f'/wanvid/{path}/{{file}}')
   async def get_resource(request):
     """ Returns a resource file. """
     return web.FileResponse(os.path.join(DIR_WEB, path, request.match_info['file']))
 
-  @routes.get(f'/rgthree/{path}/{{subdir}}/{{file}}')
+  @routes.get(f'/wanvid/{path}/{{subdir}}/{{file}}')
   async def get_resource_subdir(request):
     """ Returns a resource file. """
     return web.FileResponse(
@@ -38,14 +38,14 @@ def set_default_page_resources(path, routes):
 
 
 def set_default_page_routes(path, routes):
-  """ Sets default path handling for a hosted rgthree page. """
+  """ Sets default path handling for a hosted page. """
 
-  @routes.get(f'/rgthree/{path}')
+  @routes.get(f'/wanvid/{path}')
   async def get_path_redir(request):
     """ Redirects to the path adding a trailing slash. """
     raise web.HTTPFound(f'{request.path}/')
 
-  @routes.get(f'/rgthree/{path}/')
+  @routes.get(f'/wanvid/{path}/')
   async def get_path_index(request):
     """ Handles the page's index loading. """
     html = ''

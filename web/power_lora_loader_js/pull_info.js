@@ -3,7 +3,7 @@
  * Eliminates code duplication across power_lora_loader.js, power_lora_loader_v2.js, and power_model_loader_v2.js
  */
 
-import { rgthreeApi as wanvidApi } from "./rgthree_api.js";
+import { vidApi } from "./wanvid_api.js";
 
 // ============================================================================
 // DIRECTORY STRUCTURE MANAGER
@@ -183,14 +183,14 @@ class ModelDataManager {
         try {
             let itemsData;
 
-            // Use appropriate rgthreeApi method
+            // Use appropriate vidApi method
             if (type === 'checkpoints') {
-                itemsData = await wanvidApi.getCheckpoints(forceRefresh);
+                itemsData = await vidApi.getCheckpoints(forceRefresh);
             } else {
-                itemsData = await wanvidApi.getLoras(forceRefresh);
+                itemsData = await vidApi.getLoras(forceRefresh);
             }
 
-            // Convert rgthreeApi format to our expected format
+            // Convert vidApi format to our expected format
             if (!itemsData || !Array.isArray(itemsData)) {
                 this.caches[cacheKey] = [];
             } else {
@@ -228,7 +228,6 @@ class ModelDataManager {
         // Prevent multiple simultaneous calls only
         const cacheKey = type;
         if (this.previewLoadPromises[cacheKey]) {
-            console.log(`[Preview] Preview load already in progress for ${type}, waiting...`);
             return this.previewLoadPromises[cacheKey];
         }
 
@@ -417,7 +416,6 @@ class ModelDataManager {
                     return jsonData;
                 }
             } catch (attemptError) {
-                console.log(`[PullInfo Debug] JSON attempt failed: ${attemptError}`);
                 continue;
             }
         }

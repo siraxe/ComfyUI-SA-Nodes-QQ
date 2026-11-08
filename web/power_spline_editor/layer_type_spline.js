@@ -1,10 +1,10 @@
 // Normal spline layer widget
-import { RgthreeBaseWidget, drawRoundedRectangle, drawTogglePart, drawNumberWidgetPart, fitString } from './drawing_utils.js';
+import { QQBaseWidget, drawRoundedRectangle, drawTogglePart, drawNumberWidgetPart, fitString } from './drawing_utils.js';
 import { initializeDrivenConfig, initializeEasingConfig, initializeScaleConfig, toggleDrivenState, prepareDrivenMenu } from './persistence.js';
 import { showCustomEasingMenu, showCustomDrivenToggleMenu, showInterpolationMenu } from './context_menu.js';
 import { app } from '../../../scripts/app.js';
 
-export class PowerSplineWidget extends RgthreeBaseWidget {
+export class PowerSplineWidget extends QQBaseWidget {
     constructor(name) {
         super(name);
         this.type = "custom";
