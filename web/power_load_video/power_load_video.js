@@ -300,6 +300,101 @@ app.registerExtension({
             return null;
         };
 
+        /**
+         * Show a small popup under the cursor offering to load the embedded
+         * workflow or import the video as a Power Load Video node.
+         */
+        const showWorkflowChoicePopup = (clientX, clientY, { workflow, filename, graphX, graphY }) => {
+            // Remove any previous popup
+            const existing = document.getElementById('plv-workflow-choice-popup');
+            if (existing) existing.remove();
+
+            const popup = document.createElement('div');
+            popup.id = 'plv-workflow-choice-popup';
+            Object.assign(popup.style, {
+                position: 'fixed',
+                left: '0px',
+                top: '0px',
+                zIndex: '99999',
+                background: '#1e1e1e',
+                border: '1px solid #444',
+                borderRadius: '6px',
+                boxShadow: '0 4px 14px rgba(0,0,0,0.5)',
+                padding: '6px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '4px',
+                fontFamily: 'sans-serif',
+                fontSize: '12px',
+                userSelect: 'none',
+            });
+
+            const makeButton = (text, onClick) => {
+                const btn = document.createElement('button');
+                btn.textContent = text;
+                Object.assign(btn.style, {
+                    background: '#2a2a2a',
+                    color: '#ddd',
+                    border: '1px solid #444',
+                    borderRadius: '4px',
+                    padding: '4px 8px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    whiteSpace: 'nowrap',
+                    fontSize: '12px',
+                });
+                btn.addEventListener('mouseenter', () => { btn.style.background = '#3a3a3a'; });
+                btn.addEventListener('mouseleave', () => { btn.style.background = '#2a2a2a'; });
+                btn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    close();
+                    onClick();
+                });
+                return btn;
+            };
+
+            const close = () => {
+                popup.remove();
+                document.removeEventListener('pointerdown', onOutside, true);
+                document.removeEventListener('keydown', onKey, true);
+            };
+
+            const onOutside = (ev) => {
+                if (!popup.contains(ev.target)) close();
+            };
+            const onKey = (ev) => {
+                if (ev.key === 'Escape') close();
+            };
+
+            popup.appendChild(makeButton('Load workflow', () => {
+                app.loadGraphData(workflow);
+            }));
+            popup.appendChild(makeButton('Import as node', async () => {
+                try {
+                    const node = await createPowerLoadVideoNodeAt(filename, [graphX, graphY]);
+                    if (node) {
+                        app.canvas.selectNodes([node]);
+                    }
+                } catch (err) {
+                    console.error('[PowerLoadVideo] Failed to import video as node:', err);
+                }
+            }));
+
+            document.body.appendChild(popup);
+
+            // Position roughly at cursor (shifted up by 50% of its height), clamped to viewport
+            const rect = popup.getBoundingClientRect();
+            popup.style.left = Math.min(clientX, window.innerWidth - rect.width - 8) + 'px';
+            popup.style.top = Math.min(clientY - rect.height / 2, window.innerHeight - rect.height - 8) + 'px';
+            popup.style.top = Math.max(parseFloat(popup.style.top), 8) + 'px';
+
+            // Defer outside-click listener so the drop event doesn't immediately close it
+            setTimeout(() => {
+                document.addEventListener('pointerdown', onOutside, true);
+                document.addEventListener('keydown', onKey, true);
+            }, 0);
+        };
+
         const handleDrop = async (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -399,7 +494,17 @@ app.registerExtension({
                 const filename = await uploadVideoFile(file);
 
                 if (filename) {
+                    // Calculate mouse position in graph coordinates (accounts for pan/zoom)
+                    const ds = app.canvas.ds || { scale: 1, offset: [0, 0] };
+                    const rect = canvas.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    // Convert to graph coordinates by accounting for zoom and pan
+                    const graphX = mouseX / ds.scale - ds.offset[0];
+                    const graphY = mouseY / ds.scale - ds.offset[1];
+
                     // Check if the video has embedded workflow metadata (VHS/ComfyUI SaveVideo)
+                    let embeddedWorkflow = null;
                     try {
                         const checkResp = await api.fetchApi('/power_load_video/check_workflow', {
                             method: 'POST',
@@ -409,24 +514,26 @@ app.registerExtension({
                         if (checkResp.ok) {
                             const checkData = await checkResp.json();
                             if (checkData.has_workflow && checkData.workflow && app.loadGraphData) {
-                                app.loadGraphData(checkData.workflow);
-                                return;
+                                embeddedWorkflow = checkData.workflow;
                             }
                         }
                     } catch (err) {
                     }
 
+                    if (embeddedWorkflow) {
+                        // Show popup under cursor: load workflow or import as node
+                        showWorkflowChoicePopup(e.clientX, e.clientY, {
+                            workflow: embeddedWorkflow,
+                            filename: filename,
+                            graphX: graphX,
+                            graphY: graphY,
+                        });
+                        return;
+                    }
+
+                    // No embedded workflow - create Power Load Video node as usual
                     // Wait a moment for node types to be registered
                     await new Promise(resolve => setTimeout(resolve, 100));
-
-                    // Calculate mouse position in graph coordinates (accounts for pan/zoom)
-                    const ds = app.canvas.ds || { scale: 1, offset: [0, 0] };
-                    const rect = canvas.getBoundingClientRect();
-                    const mouseX = e.clientX - rect.left;
-                    const mouseY = e.clientY - rect.top;
-                    // Convert to graph coordinates by accounting for zoom and pan
-                    const graphX = mouseX / ds.scale - ds.offset[0];
-                    const graphY = mouseY / ds.scale - ds.offset[1];
 
                     // Create Power Load Video node at drop position under mouse
                     const node = await createPowerLoadVideoNodeAt(filename, [graphX, graphY]);

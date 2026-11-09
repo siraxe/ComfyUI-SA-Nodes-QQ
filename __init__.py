@@ -8,6 +8,7 @@ from .nodes.power_loaders import *
 from .nodes.decode_overlap import *
 
 from .nodes.power_load_video import *
+from .nodes.audio import *
 from .nodes.power_compare_video import *
 from .nodes.chain_edit_video import *
 from .nodes.power_spline_editor import *
@@ -19,6 +20,7 @@ from .nodes.lora_extract_v2 import *
 from .nodes.lora_merge_ltx import *
 from .nodes.lora_change import *
 from .nodes.lora_combine import *
+from .nodes.lora_text import *
 from .nodes.math_nodes import *
 
 from .nodes.draw_shapes import *
