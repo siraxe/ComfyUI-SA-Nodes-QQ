@@ -42,6 +42,11 @@ app.registerExtension({
 
             const widgets = this.widgets || [];
 
+            // Restore the hover-preview checkbox state (on unless saved off)
+            if (this.fileSelectorWidget) {
+                this.fileSelectorWidget.previewOn = this.properties?.preview_on_hover !== false;
+            }
+
             // Sanitize + restore speed / fps from hidden widgets
             const speedWidget = widgets.find(w => w.name === 'speed');
             if (speedWidget) speedWidget.value = Math.min(4, Math.max(0.25, sanitizeFloat(speedWidget.value, 1.0)));

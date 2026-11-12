@@ -162,7 +162,9 @@ class PowerLoadAudio:
         input_dir = folder_paths.get_input_directory()
         try:
             files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-            files = folder_paths.filter_files_content_types(files, ["audio"])
+            # Include video files too (e.g. mp4) so their audio tracks can be
+            # loaded - same selection pool as Power Load Video.
+            files = folder_paths.filter_files_content_types(files, ["audio", "video"])
             files = sorted(files)
         except Exception:
             files = []

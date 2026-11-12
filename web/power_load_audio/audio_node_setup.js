@@ -31,6 +31,7 @@ export function createAudioNodeCreatedWrapper(originalOnNodeCreated) {
         this.peaks = null;            // Float32Array of max abs per bucket
         this.rmsBuckets = null;       // Float32Array of rms per bucket
         this.onsets = null;           // array of beat/onset times (seconds)
+        this.onsetEvents = null;      // [{ t, band: 'low'|'mid'|'high', strength }]
         this.viewContrast = Math.min(3, Math.max(0, parseFloat(this.properties?.view_contrast) || 0));
 
         // addCustomWidget polyfill (same as PowerLoadVideo)
@@ -241,43 +242,115 @@ export function createAudioNodeCreatedWrapper(originalOnNodeCreated) {
             this.peaks = peaks;
             this.rmsBuckets = rms;
 
-            // Onset/beat detection: log-energy positive flux with adaptive
-            // threshold peak picking (~100 ms minimum spacing)
+            // Onset/beat detection: full-band log-energy positive flux with
+            // adaptive peak picking. Every onset is then classified into
+            // LOW / MID / HIGH by which band's normalized energy rises most
+            // (one-pole splits at 150 Hz / 2 kHz), so the BEATS view gets
+            // separate "beat types" instead of one solid wall of ticks.
+            const sr = buffer.sampleRate;
             const hop = 1024;
             const frames = Math.floor(n / hop);
-            const energies = new Float32Array(frames);
-            for (let f = 0; f < frames; f++) {
-                let sum = 0;
-                const lo = f * hop;
-                for (let i = lo; i < lo + hop; i++) sum += ch[i] * ch[i];
-                energies[f] = Math.sqrt(sum / hop);
+            const aLow = 1 - Math.exp(-2 * Math.PI * 150 / sr);
+            const aHigh = 1 - Math.exp(-2 * Math.PI * 2000 / sr);
+            const eAll = new Float32Array(frames);
+            const eLow = new Float32Array(frames);
+            const eMid = new Float32Array(frames);
+            const eHigh = new Float32Array(frames);
+            let lpLow = 0, lpHigh = 0;
+            let accAll = 0, accL = 0, accM = 0, accH = 0, hopCount = 0, bucket = 0;
+            for (let i = 0; i < frames * hop; i++) {
+                const x = ch[i];
+                lpLow += aLow * (x - lpLow);
+                lpHigh += aHigh * (x - lpHigh);
+                const low = lpLow;
+                const mid = lpHigh - lpLow;
+                const high = x - lpHigh;
+                accAll += x * x;
+                accL += low * low;
+                accM += mid * mid;
+                accH += high * high;
+                if (++hopCount === hop) {
+                    eAll[bucket] = Math.sqrt(accAll / hop);
+                    eLow[bucket] = Math.sqrt(accL / hop);
+                    eMid[bucket] = Math.sqrt(accM / hop);
+                    eHigh[bucket] = Math.sqrt(accH / hop);
+                    bucket++;
+                    accAll = accL = accM = accH = 0;
+                    hopCount = 0;
+                }
             }
+
+            // Average per-band level - used to normalize the classification
+            // so the natural spectral tilt doesn't bias every hit to LOW.
+            const bandMean = (a) => {
+                let s = 0;
+                for (let i = 0; i < a.length; i++) s += a[i];
+                return a.length > 0 ? s / a.length : 0;
+            };
+            const mL = bandMean(eLow), mM = bandMean(eMid), mH = bandMean(eHigh);
+
+            // Onset detection on the full-band energy (reliable peak picking)
             const flux = new Float32Array(frames);
             for (let f = 1; f < frames; f++) {
-                flux[f] = Math.max(0, Math.log(energies[f] + 1e-7) - Math.log(energies[f - 1] + 1e-7));
+                flux[f] = Math.max(0, Math.log(eAll[f] + 1e-7) - Math.log(eAll[f - 1] + 1e-7));
             }
             // prefix sums for the local mean threshold
             const prefix = new Float32Array(frames + 1);
             for (let f = 0; f < frames; f++) prefix[f + 1] = prefix[f] + flux[f];
+            const globalMean = frames > 0 ? prefix[frames] / frames : 0;
+
+            // Classify by the band with the biggest short-window energy rise
+            const WIN = 2; // ~46 ms at 1024 hop / 44.1 kHz
+            const classifyBand = (f) => {
+                let bl = 0, bm = 0, bh = 0, al = 0, am = 0, ah = 0;
+                for (let k = 1; k <= WIN; k++) {
+                    if (f + k < frames) { al += eLow[f + k]; am += eMid[f + k]; ah += eHigh[f + k]; }
+                    if (f - k >= 0) { bl += eLow[f - k]; bm += eMid[f - k]; bh += eHigh[f - k]; }
+                }
+                const dl = Math.max(0, al - bl) / (mL + 1e-9);
+                const dm = Math.max(0, am - bm) / (mM + 1e-9);
+                const dh = Math.max(0, ah - bh) / (mH + 1e-9);
+                if (dh >= dl && dh >= dm) return { band: 'high', level: dh };
+                if (dm >= dl) return { band: 'mid', level: dm };
+                return { band: 'low', level: dl };
+            };
+
+            // Thresholds are deliberately a bit permissive: the BEATS view's
+            // "View" contrast control then filters these candidates by
+            // strength, so 0 shows everything and higher values thin them out.
             const W = 20;
-            const onsets = [];
-            let last = -1;
-            const sr = buffer.sampleRate;
-            const minGap = 0.12;
+            const events = [];
+            let last = -Infinity;
             for (let f = 2; f < frames - 1; f++) {
                 const lo = Math.max(0, f - W);
                 const hi = Math.min(frames, f + W + 1);
                 const mean = (prefix[hi] - prefix[lo]) / (hi - lo);
-                const thr = mean * 1.4 + 1e-4;
+                const thr = Math.max(mean * 1.2, globalMean * 0.45) + 1e-4;
                 if (flux[f] >= thr && flux[f] >= flux[f - 1] && flux[f] >= flux[f + 1]) {
                     const t = (f * hop + hop / 2) / sr;
-                    if (t - last >= minGap) {
-                        onsets.push(t);
+                    if (t - last >= 0.1) {
+                        const { band, level } = classifyBand(f);
+                        // Ignore noise-level rises on steady tones (e.g. a
+                        // sustained bass wiggling the flux): the winning
+                        // band must gain a meaningful share of its average.
+                        if (level < 0.05) continue;
+                        events.push({ t, band, strength: level });
                         last = t;
                     }
                 }
             }
-            this.onsets = onsets;
+            // Normalize strength per band (0..1) for tick heights
+            const maxByBand = { low: 0, mid: 0, high: 0 };
+            for (const e of events) {
+                if (e.strength > maxByBand[e.band]) maxByBand[e.band] = e.strength;
+            }
+            for (const e of events) {
+                const m = maxByBand[e.band];
+                e.strength = m > 0 ? Math.min(1, e.strength / m) : 0.5;
+            }
+            events.sort((a, b) => a.t - b.t);
+            this.onsetEvents = events;
+            this.onsets = events.map(e => e.t);
         };
 
         // ================= WIDGETS =================
@@ -324,13 +397,16 @@ export function createAudioNodeCreatedWrapper(originalOnNodeCreated) {
         /**
          * Fetch + decode the audio file, compute analysis and reset the
          * timeline. Called on upload/drop/configure.
+         * resetCrop: user picked a new file -> [ ] markers return to full
+         * range. Configure restores them instead (no reset).
          */
-        this.loadAudioIntoDisplay = (filename) => {
+        this.loadAudioIntoDisplay = (filename, resetCrop = false) => {
             if (!filename) return;
             // skip only when already loading (undefined) or loaded (buffer);
             // a FAILED decode (null) may be retried (e.g. pressing play)
             if (this._audioLoadToken !== undefined && this._audioLoadName === filename && this.audioBuffer !== null) return;
             this._audioLoadName = filename;
+            const shouldResetCrop = !!resetCrop;
             const token = (this._audioLoadToken = (this._audioLoadToken || 0) + 1);
 
             this.stopAudioPlayback();
@@ -343,6 +419,7 @@ export function createAudioNodeCreatedWrapper(originalOnNodeCreated) {
             this.peaks = null;
             this.rmsBuckets = null;
             this.onsets = null;
+            this.onsetEvents = null;
             this.audioDuration = 0;
             this.setDirtyCanvas(true, true);
 
@@ -372,7 +449,8 @@ export function createAudioNodeCreatedWrapper(originalOnNodeCreated) {
                         const hadDefaults = (tl.startFrameMarker === 1) &&
                             ((tl.endFrameMarker === 1) || (tl.endFrameMarker !== null && tl.endFrameMarker >= tl.value.totalFrames));
                         tl.setTotalFrames(this, totalFrames);
-                        if (hadDefaults || tl.endFrameMarker === 1) {
+                        // new file -> always back to the full [ ] range
+                        if (shouldResetCrop || hadDefaults || tl.endFrameMarker === 1) {
                             tl.setStartFrame(1, this);
                             tl.setEndFrame(totalFrames, this);
                         }
@@ -410,13 +488,21 @@ export function createAudioNodeCreatedWrapper(originalOnNodeCreated) {
                     const name = data.name || data.filename || file.name;
                     this.fileSelectorWidget?.setCurrentFilename(name);
                     const combo = this.widgets.find(w => w.type === 'combo');
-                    if (combo) combo.value = name;
+                    if (combo) {
+                        // make the new file known to the combo (dropdown /
+                        // prev-next) without a full UI refresh
+                        if (combo.options?.values && !combo.options.values.includes(name)) {
+                            combo.options.values.push(name);
+                            combo.options.values.sort();
+                        }
+                        combo.value = name;
+                    }
                     if (!this.widgets_values || this.widgets_values.length === 0) {
                         this.widgets_values = [name];
                     } else {
                         this.widgets_values[0] = name;
                     }
-                    this.loadAudioIntoDisplay(name);
+                    this.loadAudioIntoDisplay(name, true);
                     return true;
                 }
             } catch (err) {

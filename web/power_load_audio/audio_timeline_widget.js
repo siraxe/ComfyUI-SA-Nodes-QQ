@@ -648,9 +648,41 @@ export class PowerAudioTimelineWidget extends QQBaseWidget {
                     ctx.fillRect(trackX + px, waveBottom - h, step - 0.5, h);
                 }
             } else {
-                // BEATS: faint waveform + onset ticks (output positions)
-                drawWave(0.3);
-                if (node.onsets && node.onsets.length > 0) {
+                // BEATS: faint waveform + onset ticks split into three stacked
+                // rows by frequency band (top = hats, middle = snare/body,
+                // bottom = kick/bass) with strength-based tick heights. This
+                // keeps the lane readable instead of one solid orange wall.
+                drawWave(0.18);
+                const events = node.onsetEvents;
+                if (events && events.length > 0) {
+                    // "View" contrast doubles as beat sensitivity: 0 draws
+                    // every detected onset, 3 keeps only the strongest
+                    // accents (strength is normalized per band in analysis).
+                    const minStrength = (vc / 3) * 0.85;
+                    const visible = events.filter(ev => ev.strength >= minStrength);
+                    const rowH = waveH / 3;
+                    const rows = {
+                        high: { top: waveTop, color: '#ffd166' },           // hats / cymbals
+                        mid: { top: waveTop + rowH, color: '#5fd39a' },     // snare / body
+                        low: { top: waveTop + rowH * 2, color: '#ff7043' }, // kick / bass
+                    };
+                    // faint separators so the three rows read as lanes
+                    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+                    ctx.fillRect(trackX, waveTop + rowH, trackW, 1);
+                    ctx.fillRect(trackX, waveTop + rowH * 2, trackW, 1);
+                    const tickW = visible.length > trackW / 2 ? 1 : 2;
+                    ctx.globalAlpha = 0.9;
+                    for (const ev of visible) {
+                        const row = rows[ev.band] || rows.mid;
+                        const x = xOfOut(ev.t / speed);
+                        if (x < trackX - 2 || x > trackEnd + 2) continue;
+                        const h = Math.max(2, ev.strength * rowH * 0.82);
+                        ctx.fillStyle = row.color;
+                        ctx.fillRect(x - tickW / 2, row.top + rowH - h - 1, tickW, h);
+                    }
+                    ctx.globalAlpha = 1;
+                } else if (node.onsets && node.onsets.length > 0) {
+                    // fallback for old analysis data (no band split)
                     ctx.fillStyle = '#ff7043';
                     const tickW = node.onsets.length > trackW / 3 ? 1 : 2;
                     for (const t of node.onsets) {
