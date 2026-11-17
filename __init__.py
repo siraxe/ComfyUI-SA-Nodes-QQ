@@ -44,7 +44,9 @@ from .nodes.samplers_experimental import *
 from .nodes.frames import *
 from .nodes.masks import *
 from .nodes.groups import *
+from .nodes.any_switch import *
 from .nodes.seed import *
+from .nodes.dataset import *
 
 
 # Import API endpoints to register routes
